@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_PATH: EpTUN.csproj
+  CONFIGURATION: Release
+  RID: win-x64
+  BASE_CI_VERSION: 0.1.0
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Resolve build version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
+            $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          } else {
+            $version = "$env:BASE_CI_VERSION-ci.$env:GITHUB_RUN_NUMBER"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Build version: $version"
+
+      - name: Restore
+        run: dotnet restore ${{ env.PROJECT_PATH }}
+
+      - name: Build
+        run: dotnet build ${{ env.PROJECT_PATH }} -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Publish self-contained (portable)
+        run: >
+          dotnet publish ${{ env.PROJECT_PATH }}
+          -c ${{ env.CONFIGURATION }}
+          -r ${{ env.RID }}
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.version.outputs.version }}
+          -o ${{ github.workspace }}\artifacts\EpTUNPortable
+
+      - name: Publish framework-dependent
+        run: >
+          dotnet publish ${{ env.PROJECT_PATH }}
+          -c ${{ env.CONFIGURATION }}
+          -r ${{ env.RID }}
+          --self-contained false
+          -p:Version=${{ steps.version.outputs.version }}
+          -o ${{ github.workspace }}\artifacts\EpTUNCheck
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EpTUNPortable-${{ env.RID }}-${{ steps.version.outputs.version }}
+          path: ${{ github.workspace }}\artifacts\EpTUNPortable
+          if-no-files-found: error
+
+      - name: Upload framework-dependent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EpTUNCheck-${{ env.RID }}-${{ steps.version.outputs.version }}
+          path: ${{ github.workspace }}\artifacts\EpTUNCheck
+          if-no-files-found: error
