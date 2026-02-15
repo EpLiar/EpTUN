@@ -8,9 +8,10 @@ on:
       - master
     tags:
       - "v*"
+      - "[0-9]*"
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   PROJECT_PATH: EpTUN.csproj
@@ -69,6 +70,16 @@ jobs:
           -p:Version=${{ steps.version.outputs.version }}
           -o ${{ github.workspace }}\artifacts\EpTUNCheck
 
+      - name: Package release assets
+        shell: pwsh
+        run: |
+          $portableZip = "${{ github.workspace }}\artifacts\EpTUNPortable-${{ env.RID }}-${{ steps.version.outputs.version }}.zip"
+          $checkZip = "${{ github.workspace }}\artifacts\EpTUNCheck-${{ env.RID }}-${{ steps.version.outputs.version }}.zip"
+          if (Test-Path $portableZip) { Remove-Item $portableZip -Force }
+          if (Test-Path $checkZip) { Remove-Item $checkZip -Force }
+          Compress-Archive -Path "${{ github.workspace }}\artifacts\EpTUNPortable\*" -DestinationPath $portableZip -Force
+          Compress-Archive -Path "${{ github.workspace }}\artifacts\EpTUNCheck\*" -DestinationPath $checkZip -Force
+
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
@@ -82,3 +93,16 @@ jobs:
           name: EpTUNCheck-${{ env.RID }}-${{ steps.version.outputs.version }}
           path: ${{ github.workspace }}\artifacts\EpTUNCheck
           if-no-files-found: error
+
+      - name: Upload assets to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ github.workspace }}\artifacts\EpTUNPortable-${{ env.RID }}-${{ steps.version.outputs.version }}.zip
+            ${{ github.workspace }}\artifacts\EpTUNCheck-${{ env.RID }}-${{ steps.version.outputs.version }}.zip
