@@ -482,6 +482,7 @@ public sealed class VpnSession
             _log.WriteLine($"[INFO] Applying {allExcludeRoutes.Length} exclude routes (route-level logs suppressed).");
         }
 
+        var excludeRouteApplyStopwatch = Stopwatch.StartNew();
         var skippedIpv6Exclude = 0;
         for (var i = 0; i < allExcludeRoutes.Length; i++)
         {
@@ -511,6 +512,13 @@ public sealed class VpnSession
             }
         }
 
+        excludeRouteApplyStopwatch.Stop();
+        if (allExcludeRoutes.Length > 0)
+        {
+            _log.WriteLine(
+                $"[INFO] Exclude routes apply completed in {excludeRouteApplyStopwatch.Elapsed.TotalSeconds:F1}s for {allExcludeRoutes.Length} routes.");
+        }
+
         if (skippedIpv6Exclude > 0)
         {
             _error.WriteLine($"[WARN] Skipped {skippedIpv6Exclude} IPv6 exclude routes: no IPv6 default route.");
@@ -538,8 +546,14 @@ public sealed class VpnSession
         int? interfaceIndex = null,
         bool logRoute = true)
     {
-        await _routeManager.DeleteRouteAsync(route, gateway, cancellationToken, suppressWarning: true, interfaceIndex);
-        await _routeManager.AddRouteAsync(route, gateway, metric, cancellationToken, interfaceIndex, logCommand: logRoute);
+        await _routeManager.AddRouteAsync(
+            route,
+            gateway,
+            metric,
+            cancellationToken,
+            interfaceIndex,
+            logCommand: logRoute,
+            replaceIfExists: true);
         _managedRoutes.Add(new ManagedRoute(route, gateway, interfaceIndex));
 
         if (logRoute)
