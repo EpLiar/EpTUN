@@ -36,8 +36,12 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF -like "refs/tags/v*") {
-            $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+            if ($env:GITHUB_REF_NAME.StartsWith("v")) {
+              $version = $env:GITHUB_REF_NAME.Substring(1)
+            } else {
+              $version = $env:GITHUB_REF_NAME
+            }
           } else {
             $version = "$env:BASE_CI_VERSION-ci.$env:GITHUB_RUN_NUMBER"
           }
