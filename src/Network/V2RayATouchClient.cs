@@ -1,11 +1,17 @@
-﻿using System.Net;
+﻿using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace EpTUN;
 
 internal static class V2RayATouchClient
 {
+    private static readonly ConcurrentDictionary<string, V2RayASessionState> SessionStates = new(StringComparer.Ordinal);
+    private static readonly TimeSpan CookieSessionReuseWindow = TimeSpan.FromMinutes(10);
+
     public static async Task<Uri> ResolveProxyUriAsync(
         V2RayAConfig config,
         ProxyConfig fallbackProxy,
@@ -15,8 +21,10 @@ internal static class V2RayATouchClient
         var baseUri = config.BuildBaseUri();
         var portsUri = new Uri(baseUri, "api/ports");
 
-        using var httpClient = CreateHttpClient(config);
-        using var request = BuildRequest(config, baseUri, portsUri);
+        var sessionState = GetSessionState(config, baseUri);
+        using var httpClient = CreateHttpClient(config, sessionState);
+        var runtimeAuthorization = await ResolveAuthorizationAsync(config, baseUri, httpClient, log, cancellationToken, sessionState);
+        using var request = BuildRequest(config, baseUri, portsUri, runtimeAuthorization);
 
         log.WriteLine($"[INFO] Querying v2rayA: {portsUri}");
         using var response = await httpClient.SendAsync(
@@ -85,8 +93,10 @@ internal static class V2RayATouchClient
         var baseUri = config.BuildBaseUri();
         var touchUri = new Uri(baseUri, "api/touch");
 
-        using var httpClient = CreateHttpClient(config);
-        using var request = BuildRequest(config, baseUri, touchUri);
+        var sessionState = GetSessionState(config, baseUri);
+        using var httpClient = CreateHttpClient(config, sessionState);
+        var runtimeAuthorization = await ResolveAuthorizationAsync(config, baseUri, httpClient, log, cancellationToken, sessionState);
+        using var request = BuildRequest(config, baseUri, touchUri, runtimeAuthorization);
 
         log.WriteLine($"[INFO] Querying v2rayA: {touchUri}");
         using var response = await httpClient.SendAsync(
@@ -196,28 +206,330 @@ internal static class V2RayATouchClient
             .ThenBy(static x => x.Network, StringComparer.Ordinal)
             .ThenBy(static x => x.PrefixLength)
             .ToArray();
-        log.WriteLine($"[INFO] v2rayA dynamic excludeCidrs: {string.Join(", ", ordered.Select(static x => x.Network + "/" + x.PrefixLength))}");
+
+        const int previewCount = 20;
+        var sample = ordered
+            .Take(previewCount)
+            .Select(static x => x.Network + "/" + x.PrefixLength)
+            .ToArray();
+        var omitted = ordered.Length - sample.Length;
+        if (omitted > 0)
+        {
+            log.WriteLine(
+                $"[INFO] v2rayA dynamic excludeCidrs resolved {ordered.Length} entries. Sample: {string.Join(", ", sample)} (+{omitted} more)");
+        }
+        else
+        {
+            log.WriteLine($"[INFO] v2rayA dynamic excludeCidrs: {string.Join(", ", sample)}");
+        }
+
         return ordered;
     }
 
-    private static HttpClient CreateHttpClient(V2RayAConfig config)
+    private static HttpClient CreateHttpClient(V2RayAConfig config, V2RayASessionState sessionState)
     {
-        return new HttpClient
+        var handler = new HttpClientHandler
+        {
+            UseCookies = true,
+            CookieContainer = sessionState.CookieContainer
+        };
+
+        return new HttpClient(handler)
         {
             Timeout = TimeSpan.FromMilliseconds(config.TimeoutMs)
         };
     }
 
-    private static HttpRequestMessage BuildRequest(V2RayAConfig config, Uri baseUri, Uri requestUri)
+    private static async Task<string?> ResolveAuthorizationAsync(
+        V2RayAConfig config,
+        Uri baseUri,
+        HttpClient httpClient,
+        TextWriter log,
+        CancellationToken cancellationToken,
+        V2RayASessionState sessionState)
+    {
+        var configuredAuthorization = NormalizeAuthorization(config.Authorization);
+        if (!config.HasCredentials())
+        {
+            return configuredAuthorization;
+        }
+
+        lock (sessionState.SyncRoot)
+        {
+            if (!string.IsNullOrWhiteSpace(sessionState.Authorization))
+            {
+                return sessionState.Authorization;
+            }
+
+            if (sessionState.CookieSessionReady &&
+                DateTimeOffset.UtcNow - sessionState.LastLoginUtc <= CookieSessionReuseWindow)
+            {
+                log.WriteLine("[INFO] v2rayA login skipped (reusing previous cookie session).");
+                return configuredAuthorization;
+            }
+        }
+
+        var loginUri = new Uri(baseUri, "api/login");
+        using var loginRequest = BuildLoginRequest(config, baseUri, loginUri);
+        log.WriteLine($"[INFO] Logging in to v2rayA: {loginUri}");
+
+        using var loginResponse = await httpClient.SendAsync(
+            loginRequest,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+
+        var responseText = await loginResponse.Content.ReadAsStringAsync(cancellationToken);
+        if (!loginResponse.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(
+                $"v2rayA /api/login returned {(int)loginResponse.StatusCode} {loginResponse.ReasonPhrase}: {TrimForLog(responseText)}");
+        }
+
+        ValidateLoginResponse(responseText);
+
+        var loginAuthorization = ExtractAuthorizationFromLoginResponse(loginResponse, responseText);
+        if (!string.IsNullOrWhiteSpace(loginAuthorization))
+        {
+            lock (sessionState.SyncRoot)
+            {
+                sessionState.Authorization = loginAuthorization;
+                sessionState.CookieSessionReady = false;
+                sessionState.LastLoginUtc = DateTimeOffset.UtcNow;
+            }
+
+            log.WriteLine("[INFO] v2rayA login succeeded (authorization token acquired).");
+            return loginAuthorization;
+        }
+
+        lock (sessionState.SyncRoot)
+        {
+            sessionState.CookieSessionReady = true;
+            sessionState.LastLoginUtc = DateTimeOffset.UtcNow;
+        }
+
+        if (!string.IsNullOrWhiteSpace(configuredAuthorization))
+        {
+            log.WriteLine("[WARN] v2rayA login succeeded but no authorization token found; fallback to configured authorization.");
+            return configuredAuthorization;
+        }
+
+        log.WriteLine("[INFO] v2rayA login succeeded (session-cookie mode).");
+        return null;
+    }
+
+    private static HttpRequestMessage BuildLoginRequest(V2RayAConfig config, Uri baseUri, Uri loginUri)
+    {
+        if (string.IsNullOrWhiteSpace(config.Username) || string.IsNullOrWhiteSpace(config.Password))
+        {
+            throw new InvalidOperationException("v2rayA.username and v2rayA.password are required for /api/login.");
+        }
+
+        var payloadJson = JsonSerializer.Serialize(
+            new V2RayALoginPayload(config.Username.Trim(), config.Password));
+
+        var request = new HttpRequestMessage(HttpMethod.Post, loginUri);
+        request.Headers.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
+        request.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7");
+        request.Headers.TryAddWithoutValidation("Origin", baseUri.GetLeftPart(UriPartial.Authority));
+        request.Headers.TryAddWithoutValidation("Referer", baseUri.ToString());
+        request.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 EpTUN");
+        request.Headers.TryAddWithoutValidation("X-V2raya-Request-Id", BuildRequestId(config.RequestId));
+        request.Content = new StringContent(payloadJson, Encoding.UTF8, "application/json");
+        return request;
+    }
+
+    private static void ValidateLoginResponse(string responseText)
+    {
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            return;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(responseText);
+            if (!TryReadStringPropertyIgnoreCase(doc.RootElement, "code", out var code))
+            {
+                return;
+            }
+
+            if (code.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            if (TryReadStringPropertyIgnoreCase(doc.RootElement, "message", out var message))
+            {
+                throw new InvalidOperationException($"v2rayA /api/login failed: {message} (code: {code}).");
+            }
+
+            throw new InvalidOperationException($"v2rayA /api/login failed with code: {code}.");
+        }
+        catch (JsonException)
+        {
+            // Non-JSON response is handled by caller; keep behavior compatible.
+        }
+    }
+
+    private static HttpRequestMessage BuildRequest(
+        V2RayAConfig config,
+        Uri baseUri,
+        Uri requestUri,
+        string? runtimeAuthorization)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
         request.Headers.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
         request.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7");
-        request.Headers.TryAddWithoutValidation("Authorization", config.Authorization);
+
+        var authorization = NormalizeAuthorization(runtimeAuthorization);
+        if (!string.IsNullOrWhiteSpace(authorization))
+        {
+            request.Headers.TryAddWithoutValidation("Authorization", authorization);
+        }
+
         request.Headers.TryAddWithoutValidation("Referer", baseUri.ToString());
         request.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 EpTUN");
         request.Headers.TryAddWithoutValidation("X-V2raya-Request-Id", BuildRequestId(config.RequestId));
         return request;
+    }
+
+    private static string? ExtractAuthorizationFromLoginResponse(HttpResponseMessage response, string responseText)
+    {
+        if (TryReadAuthorizationFromHeaders(response, out var headerAuthorization))
+        {
+            return headerAuthorization;
+        }
+
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(responseText);
+            if (TryReadAuthorizationFromJson(doc.RootElement, out var jsonAuthorization))
+            {
+                return jsonAuthorization;
+            }
+        }
+        catch
+        {
+            // Keep cookie-session mode if login body is not JSON.
+        }
+
+        return null;
+    }
+
+    private static bool TryReadAuthorizationFromHeaders(HttpResponseMessage response, out string authorization)
+    {
+        authorization = string.Empty;
+        if (response.Headers.TryGetValues("Authorization", out var values))
+        {
+            var value = values.FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                authorization = value.Trim();
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryReadAuthorizationFromJson(JsonElement element, out string authorization)
+    {
+        authorization = string.Empty;
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (TryReadStringByCandidateNames(element, out authorization))
+        {
+            return true;
+        }
+
+        if (TryReadPropertyIgnoreCase(element, "data", out var data) &&
+            data.ValueKind == JsonValueKind.Object &&
+            TryReadStringByCandidateNames(data, out authorization))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryReadPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.NameEquals(name) ||
+                    property.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = property.Value;
+                    return true;
+                }
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static bool TryReadStringPropertyIgnoreCase(JsonElement element, string name, out string value)
+    {
+        value = string.Empty;
+        if (!TryReadPropertyIgnoreCase(element, name, out var property))
+        {
+            return false;
+        }
+
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var text = property.GetString();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        value = text.Trim();
+        return true;
+    }
+
+    private static bool TryReadStringByCandidateNames(JsonElement element, out string value)
+    {
+        foreach (var candidate in new[] { "authorization", "token", "accessToken", "access_token", "auth" })
+        {
+            if (TryReadStringPropertyIgnoreCase(element, candidate, out value))
+            {
+                return true;
+            }
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static string? NormalizeAuthorization(string? authorization)
+    {
+        return string.IsNullOrWhiteSpace(authorization) ? null : authorization.Trim();
+    }
+
+    private static V2RayASessionState GetSessionState(V2RayAConfig config, Uri baseUri)
+    {
+        var key =
+            $"{baseUri.Scheme}://{baseUri.Authority}|" +
+            $"{NormalizeAuthorization(config.Authorization) ?? string.Empty}|" +
+            $"{config.Username ?? string.Empty}|" +
+            $"{config.Password ?? string.Empty}";
+
+        return SessionStates.GetOrAdd(key, static _ => new V2RayASessionState());
     }
 
     private static string BuildRequestId(string? configured)
@@ -512,6 +824,19 @@ internal static class V2RayATouchClient
         }
 
         return text[..maxLen] + "...";
+    }
+
+    private sealed record V2RayALoginPayload(
+        [property: JsonPropertyName("username")] string Username,
+        [property: JsonPropertyName("password")] string Password);
+
+    private sealed class V2RayASessionState
+    {
+        public object SyncRoot { get; } = new();
+        public CookieContainer CookieContainer { get; } = new();
+        public string? Authorization { get; set; }
+        public bool CookieSessionReady { get; set; }
+        public DateTimeOffset LastLoginUtc { get; set; }
     }
 }
 

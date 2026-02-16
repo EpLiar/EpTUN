@@ -18,6 +18,9 @@ public sealed class AppConfig
     [JsonPropertyName("v2rayA")]
     public V2RayAConfig V2RayA { get; init; } = new();
 
+    [JsonPropertyName("logging")]
+    public LoggingConfig Logging { get; init; } = new();
+
     public static JsonSerializerOptions SerializerOptions { get; } = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -31,6 +34,83 @@ public sealed class AppConfig
         Tun2Socks.Validate();
         Vpn.Validate();
         V2RayA.Validate();
+        Logging.Validate();
+    }
+}
+
+public enum LogLevelSetting
+{
+    Info = 1,
+    Warn = 2,
+    Error = 3,
+    Off = 100
+}
+
+public sealed class LoggingConfig
+{
+    [JsonPropertyName("windowLevel")]
+    public string? WindowLevel { get; init; } = "INFO";
+
+    [JsonPropertyName("fileLevel")]
+    public string? FileLevel { get; init; } = "INFO";
+
+    public void Validate()
+    {
+        if (!TryParseLevel(WindowLevel, out _))
+        {
+            throw new ArgumentException("logging.windowLevel must be INFO, WARN, ERROR, OFF, or NONE.");
+        }
+
+        if (!TryParseLevel(FileLevel, out _))
+        {
+            throw new ArgumentException("logging.fileLevel must be INFO, WARN, ERROR, OFF, or NONE.");
+        }
+    }
+
+    public static bool TryParseLevel(string? value, out LogLevelSetting level)
+    {
+        level = LogLevelSetting.Info;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        switch (value.Trim().ToUpperInvariant())
+        {
+            case "INFO":
+                level = LogLevelSetting.Info;
+                return true;
+            case "WARN":
+            case "WARNING":
+                level = LogLevelSetting.Warn;
+                return true;
+            case "ERROR":
+                level = LogLevelSetting.Error;
+                return true;
+            case "OFF":
+            case "NONE":
+                level = LogLevelSetting.Off;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    public static LogLevelSetting ParseLevelOrDefault(string? value, LogLevelSetting fallback = LogLevelSetting.Info)
+    {
+        return TryParseLevel(value, out var level) ? level : fallback;
+    }
+
+    public static string ToText(LogLevelSetting level)
+    {
+        return level switch
+        {
+            LogLevelSetting.Info => "INFO",
+            LogLevelSetting.Warn => "WARN",
+            LogLevelSetting.Error => "ERROR",
+            LogLevelSetting.Off => "OFF",
+            _ => "INFO"
+        };
     }
 }
 
@@ -216,6 +296,12 @@ public sealed class V2RayAConfig
     [JsonPropertyName("authorization")]
     public string? Authorization { get; init; }
 
+    [JsonPropertyName("username")]
+    public string? Username { get; init; }
+
+    [JsonPropertyName("password")]
+    public string? Password { get; init; }
+
     [JsonPropertyName("requestId")]
     public string? RequestId { get; init; }
 
@@ -243,15 +329,31 @@ public sealed class V2RayAConfig
 
         _ = BuildBaseUri();
 
-        if (string.IsNullOrWhiteSpace(Authorization))
+        var hasAuthorization = !string.IsNullOrWhiteSpace(Authorization);
+        var hasUsername = !string.IsNullOrWhiteSpace(Username);
+        var hasPassword = !string.IsNullOrWhiteSpace(Password);
+
+        if (hasUsername != hasPassword)
         {
-            throw new ArgumentException("v2rayA.authorization is required when v2rayA.enabled is true.");
+            throw new ArgumentException("v2rayA.username and v2rayA.password must both be set together.");
+        }
+
+        if (!hasAuthorization && !hasUsername)
+        {
+            throw new ArgumentException(
+                "When v2rayA.enabled is true, set either v2rayA.authorization or both v2rayA.username and v2rayA.password.");
         }
 
         if (TimeoutMs is < 100 or > 120000)
         {
             throw new ArgumentException("v2rayA.timeoutMs must be in range 100..120000.");
         }
+    }
+
+    public bool HasCredentials()
+    {
+        return !string.IsNullOrWhiteSpace(Username) &&
+               !string.IsNullOrWhiteSpace(Password);
     }
 
     public Uri BuildBaseUri()

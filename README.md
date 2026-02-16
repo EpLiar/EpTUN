@@ -1,5 +1,7 @@
 ﻿# EpTUN
 
+- 中文文档: [README-cn.md](README-cn.md)
+
 EpTUN provides a Windows GUI (no console window) and tray icon for [tun2socks](https://github.com/xjasonlyu/tun2socks) routing.
 
 ## External Components
@@ -15,11 +17,15 @@ EpTUN provides a Windows GUI (no console window) and tray icon for [tun2socks](h
 - UAC prompt appears automatically (`requireAdministrator` manifest).
 - Use `Start VPN` / `Stop VPN` / `Restart VPN`.
 - Use `Minimize To Tray` to keep it in taskbar tray.
+- Runtime logs are also written to a local file (default: `logs/eptun-YYYYMMDD-HHMMSS.log` near `appsettings.json`; fallback to `%LOCALAPPDATA%/EpTUN/logs`).
 
 ## [v2rayA](https://github.com/v2rayA/v2rayA) integration
 
 When `v2rayA.enabled = true`:
 
+- If `v2rayA.username` + `v2rayA.password` are set, EpTUN calls `POST /api/login` first, then uses the authenticated session/token for subsequent API calls.
+- `v2rayA.authorization` can be used directly without login.
+- Auth rule: set either `authorization`, or both `username` + `password`.
 - `GET /api/ports` is used to detect local proxy port.
 - For SOCKS mode, `socks5` is preferred by default, then fallback to `socks5WithPac`.
 - `GET /api/touch` is used to auto-add connected node IPs into runtime `excludeCidrs` (`/32` for IPv4, `/128` for IPv6).
@@ -37,9 +43,14 @@ Config fields:
 - `vpn.cnDatPath`
 - `vpn.bypassCn`
 - `v2rayA.baseUrl`
+- `v2rayA.authorization`
+- `v2rayA.username`
+- `v2rayA.password`
 - `v2rayA.autoDetectProxyPort`
 - `v2rayA.preferPacPort`
 - `v2rayA.proxyHostOverride`
+- `logging.windowLevel` (`INFO` / `WARN` / `ERROR` / `OFF` or `NONE`, default `INFO`)
+- `logging.fileLevel` (`INFO` / `WARN` / `ERROR` / `OFF` or `NONE`, default `INFO`)
 
 ## Build
 

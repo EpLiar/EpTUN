@@ -27,6 +27,10 @@ internal sealed class MainForm : Form
     private readonly ToolStripMenuItem _trayExitItem;
 
     private readonly Icon _appIcon;
+    private readonly LogLevelSetting _windowLogLevel;
+    private readonly LogLevelSetting _fileLogLevel;
+    private readonly string[] _logLevelLoadWarnings;
+    private readonly FileLogSink? _fileLogSink;
     private readonly UiLogWriter _logWriter;
     private readonly UiLogWriter _errorWriter;
 
@@ -40,6 +44,21 @@ internal sealed class MainForm : Form
     {
         _appIcon = IconLoader.LoadFromPngCandidates();
         Icon = _appIcon;
+
+        (_windowLogLevel, _fileLogLevel, _logLevelLoadWarnings) = ResolveLogLevelSettings(configPath);
+
+        string? fileLogInitError = null;
+        if (_fileLogLevel != LogLevelSetting.Off)
+        {
+            try
+            {
+                _fileLogSink = FileLogSink.Create(configPath);
+            }
+            catch (Exception ex)
+            {
+                fileLogInitError = ex.Message;
+            }
+        }
 
         _logWriter = new UiLogWriter(line => AppendLog("INFO", line));
         _errorWriter = new UiLogWriter(line => AppendLog("ERROR", line));
@@ -73,6 +92,25 @@ internal sealed class MainForm : Form
         TryLoadBypassCnSetting(configPath, logErrors: false);
 
         AppendLog("INFO", "UI ready.");
+        AppendLog("INFO", $"Log levels: window>={LoggingConfig.ToText(_windowLogLevel)}, file>={LoggingConfig.ToText(_fileLogLevel)}");
+        if (_fileLogSink is not null)
+        {
+            AppendLog("INFO", $"Local log file: {_fileLogSink.FilePath}");
+        }
+        else if (_fileLogLevel == LogLevelSetting.Off)
+        {
+            AppendLog("INFO", "Local file logging is disabled by logging.fileLevel.");
+        }
+        else if (!string.IsNullOrWhiteSpace(fileLogInitError))
+        {
+            AppendLog("WARN", $"Local file logging disabled: {fileLogInitError}");
+        }
+
+        foreach (var warning in _logLevelLoadWarnings)
+        {
+            AppendLog("WARN", warning);
+        }
+
         if (!IsAdministrator())
         {
             AppendLog("ERROR", "Administrator privileges are required. Restart app and approve UAC.");
@@ -91,6 +129,7 @@ internal sealed class MainForm : Form
             _appIcon.Dispose();
             _logWriter.Dispose();
             _errorWriter.Dispose();
+            _fileLogSink?.Dispose();
             _sessionCts?.Dispose();
         }
 
@@ -603,16 +642,128 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var line = $"[{DateTime.Now:HH:mm:ss}] [{level}] {normalized}";
-        _logTextBox.AppendText(line + Environment.NewLine);
-
-        if (_logTextBox.TextLength > 60000)
+        var effectiveLevel = LoggingConfig.ParseLevelOrDefault(level);
+        var content = normalized;
+        if (TryExtractEmbeddedLevel(normalized, out var embeddedLevel, out var stripped))
         {
-            _logTextBox.Text = _logTextBox.Text[^45000..];
+            effectiveLevel = embeddedLevel;
+            if (!string.IsNullOrWhiteSpace(stripped))
+            {
+                content = stripped;
+            }
         }
 
-        _logTextBox.SelectionStart = _logTextBox.TextLength;
-        _logTextBox.ScrollToCaret();
+        var writeWindow = ShouldWriteLevel(effectiveLevel, _windowLogLevel);
+        var writeFile = ShouldWriteLevel(effectiveLevel, _fileLogLevel) && _fileLogSink is not null;
+        if (!writeWindow && !writeFile)
+        {
+            return;
+        }
+
+        var line = $"[{DateTime.Now:HH:mm:ss}] [{LoggingConfig.ToText(effectiveLevel)}] {content}";
+        if (writeWindow)
+        {
+            _logTextBox.AppendText(line + Environment.NewLine);
+
+            if (_logTextBox.TextLength > 60000)
+            {
+                _logTextBox.Text = _logTextBox.Text[^45000..];
+            }
+
+            _logTextBox.SelectionStart = _logTextBox.TextLength;
+            _logTextBox.ScrollToCaret();
+        }
+
+        if (writeFile)
+        {
+            _fileLogSink!.WriteLine(line);
+        }
+    }
+
+    private static (LogLevelSetting WindowLevel, LogLevelSetting FileLevel, string[] Warnings) ResolveLogLevelSettings(string configPath)
+    {
+        var warnings = new List<string>();
+        var windowLevel = LogLevelSetting.Info;
+        var fileLevel = LogLevelSetting.Info;
+
+        string resolvedPath;
+        try
+        {
+            resolvedPath = Path.GetFullPath(configPath.Trim());
+        }
+        catch
+        {
+            return (windowLevel, fileLevel, warnings.ToArray());
+        }
+
+        if (!File.Exists(resolvedPath))
+        {
+            return (windowLevel, fileLevel, warnings.ToArray());
+        }
+
+        try
+        {
+            var json = File.ReadAllText(resolvedPath);
+            var config = JsonSerializer.Deserialize<AppConfig>(json, AppConfig.SerializerOptions);
+            if (config is null)
+            {
+                warnings.Add("Failed to parse config for logging levels. Falling back to INFO.");
+                return (windowLevel, fileLevel, warnings.ToArray());
+            }
+
+            if (!LoggingConfig.TryParseLevel(config.Logging.WindowLevel, out windowLevel))
+            {
+                warnings.Add("Invalid logging.windowLevel. Use INFO/WARN/ERROR/OFF (or NONE). Falling back to INFO.");
+                windowLevel = LogLevelSetting.Info;
+            }
+
+            if (!LoggingConfig.TryParseLevel(config.Logging.FileLevel, out fileLevel))
+            {
+                warnings.Add("Invalid logging.fileLevel. Use INFO/WARN/ERROR/OFF (or NONE). Falling back to INFO.");
+                fileLevel = LogLevelSetting.Info;
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Failed to read logging levels. Falling back to INFO. {ex.Message}");
+        }
+
+        return (windowLevel, fileLevel, warnings.ToArray());
+    }
+
+    private static bool ShouldWriteLevel(LogLevelSetting actualLevel, LogLevelSetting minLevel)
+    {
+        if (minLevel == LogLevelSetting.Off || actualLevel == LogLevelSetting.Off)
+        {
+            return false;
+        }
+
+        return actualLevel >= minLevel;
+    }
+
+    private static bool TryExtractEmbeddedLevel(string message, out LogLevelSetting level, out string content)
+    {
+        level = LogLevelSetting.Info;
+        content = string.Empty;
+        if (!message.StartsWith("[", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var endBracket = message.IndexOf(']');
+        if (endBracket <= 1)
+        {
+            return false;
+        }
+
+        var token = message[1..endBracket];
+        if (!LoggingConfig.TryParseLevel(token, out level))
+        {
+            return false;
+        }
+
+        content = message[(endBracket + 1)..].TrimStart();
+        return true;
     }
 
     private void TryLoadBypassCnSetting(string configPath, bool logErrors)
