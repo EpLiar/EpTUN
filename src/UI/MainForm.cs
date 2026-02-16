@@ -10,6 +10,7 @@ internal sealed class MainForm : Form
     private readonly Button _browseConfigButton = new();
     private readonly Button _openConfigButton = new();
     private readonly CheckBox _bypassCnCheckBox = new();
+    private readonly Button _editConfigButton = new();
     private readonly Button _startButton = new();
     private readonly Button _stopButton = new();
     private readonly Button _restartButton = new();
@@ -207,6 +208,9 @@ internal sealed class MainForm : Form
             Margin = new Padding(0, 8, 0, 0)
         };
 
+        _editConfigButton.Text = "Config Editor";
+        _editConfigButton.AutoSize = true;
+
         _startButton.Text = "Start VPN";
         _startButton.AutoSize = true;
 
@@ -227,6 +231,7 @@ internal sealed class MainForm : Form
         _wrapLogsCheckBox.Checked = true;
         _wrapLogsCheckBox.Margin = new Padding(8, 6, 0, 0);
 
+        controlRow.Controls.Add(_editConfigButton);
         controlRow.Controls.Add(_startButton);
         controlRow.Controls.Add(_stopButton);
         controlRow.Controls.Add(_restartButton);
@@ -258,6 +263,7 @@ internal sealed class MainForm : Form
     {
         _browseConfigButton.Click += OnBrowseConfigClicked;
         _openConfigButton.Click += OnOpenConfigClicked;
+        _editConfigButton.Click += OnEditConfigClicked;
         _startButton.Click += async (_, _) => await StartVpnAsync();
         _stopButton.Click += (_, _) => StopVpn();
         _restartButton.Click += async (_, _) => await RestartVpnAsync();
@@ -449,6 +455,7 @@ internal sealed class MainForm : Form
 
         var elevated = IsAdministrator();
         _startButton.Enabled = !_isRunning && elevated;
+        _editConfigButton.Enabled = !_isRunning;
         _stopButton.Enabled = _isRunning;
         _restartButton.Enabled = _isRunning && elevated;
         _trayStartItem.Enabled = _startButton.Enabled;
@@ -509,6 +516,38 @@ internal sealed class MainForm : Form
             Arguments = $"\"{configPath}\"",
             UseShellExecute = false
         });
+    }
+
+    private void OnEditConfigClicked(object? sender, EventArgs e)
+    {
+        var configPath = _configPathTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(configPath))
+        {
+            MessageBox.Show(
+                this,
+                "Please select appsettings.json.",
+                "EpTUN",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        configPath = Path.GetFullPath(configPath);
+        _configPathTextBox.Text = configPath;
+        if (!File.Exists(configPath))
+        {
+            MessageBox.Show(
+                this,
+                $"Config file not found:\n{configPath}",
+                "EpTUN",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        using var editor = new ConfigEditorForm(configPath);
+        _ = editor.ShowDialog(this);
+        TryLoadBypassCnSetting(configPath, logErrors: true);
     }
 
     private void OnFormResize(object? sender, EventArgs e)
