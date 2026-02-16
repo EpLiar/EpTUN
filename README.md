@@ -37,6 +37,32 @@ When `v2rayA.enabled = true`:
 - Enable `Bypass CN` checkbox in GUI.
 - CN CIDRs from `cn.dat` are added as bypass routes (not hijacked by VPN).
 
+## Traffic Hijack / Route Model (AsciiDoc)
+
+```adoc
+[source,text]
+----
+[Windows App Traffic]
+          |
+          v
+ [Windows Route Lookup]
+          |
+          +--> dst in excludeCidrs?
+          |      (LAN + CN + proxy host + runtime dynamic excludes)
+          |          |
+          |          +--> YES -> Physical NIC default gateway (bypass VPN)
+          |
+          +--> NO  -> 0.0.0.0/1 + 128.0.0.0/1
+                         via Wintun (EpTUN)
+                               |
+                               v
+                        tun2socks process
+                               |
+                               v
+                        upstream local proxy
+----
+```
+
 Config fields:
 
 - `tun2Socks.executablePath`
