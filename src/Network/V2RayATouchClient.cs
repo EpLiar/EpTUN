@@ -226,6 +226,52 @@ internal static class V2RayATouchClient
         return ordered;
     }
 
+    public static async Task<(Uri ProxyUri, int ConnectedServerCount)> TestConnectionAsync(
+        V2RayAConfig config,
+        ProxyConfig fallbackProxy,
+        TextWriter log,
+        CancellationToken cancellationToken)
+    {
+        var proxyUri = await ResolveProxyUriAsync(config, fallbackProxy, log, cancellationToken);
+
+        var baseUri = config.BuildBaseUri();
+        var touchUri = new Uri(baseUri, "api/touch");
+
+        var sessionState = GetSessionState(config, baseUri);
+        using var httpClient = CreateHttpClient(config, sessionState);
+        var runtimeAuthorization = await ResolveAuthorizationAsync(config, baseUri, httpClient, log, cancellationToken, sessionState);
+        using var request = BuildRequest(config, baseUri, touchUri, runtimeAuthorization);
+
+        log.WriteLine($"[INFO] Querying v2rayA: {touchUri}");
+        using var response = await httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+
+        var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(
+                $"v2rayA /api/touch returned {(int)response.StatusCode} {response.ReasonPhrase}: {TrimForLog(responseText)}");
+        }
+
+        using var doc = JsonDocument.Parse(responseText);
+        if (!doc.RootElement.TryGetProperty("data", out var data) ||
+            !data.TryGetProperty("touch", out var touch))
+        {
+            throw new InvalidOperationException("v2rayA /api/touch response does not contain data.touch.");
+        }
+
+        var connectedCount = EnumerateConnected(touch).Count();
+        if (connectedCount <= 0)
+        {
+            throw new InvalidOperationException("v2rayA /api/touch indicates no connected server.");
+        }
+
+        log.WriteLine($"[INFO] v2rayA runtime check passed with {connectedCount} connected server(s).");
+        return (proxyUri, connectedCount);
+    }
+
     private static HttpClient CreateHttpClient(V2RayAConfig config, V2RayASessionState sessionState)
     {
         var handler = new HttpClientHandler

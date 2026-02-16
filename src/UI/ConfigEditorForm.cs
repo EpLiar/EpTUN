@@ -7,6 +7,10 @@ namespace EpTUN;
 internal sealed class ConfigEditorForm : Form
 {
     private static readonly Font LabelMonoFont = CreateLabelMonoFont();
+    private static readonly JsonSerializerOptions IndentedJsonOptions = new(AppConfig.SerializerOptions)
+    {
+        WriteIndented = true
+    };
 
     private readonly string _configPath;
     private readonly Label _pathLabel = new();
@@ -230,9 +234,48 @@ internal sealed class ConfigEditorForm : Form
             "tun2Socks" => new Tun2SocksSectionEditor(this, MarkDirty),
             "vpn" => new VpnSectionEditor(this, MarkDirty),
             "logging" => new LoggingSectionEditor(MarkDirty),
-            "v2rayA" => new RawJsonSectionEditor(MarkDirty),
+            "v2rayA" => new V2RayASectionEditor(this, MarkDirty, TestV2RayAConnectionAsync),
             _ => new RawJsonSectionEditor(MarkDirty)
         };
+    }
+
+    private async Task<(Uri ProxyUri, int ConnectedServerCount)> TestV2RayAConnectionAsync(V2RayAConfig v2rayAConfig)
+    {
+        if (!_sectionEditors.TryGetValue("proxy", out var proxyEditor))
+        {
+            throw new InvalidOperationException("proxy section is required for v2rayA test.");
+        }
+
+        JsonNode? proxyNode;
+        try
+        {
+            proxyNode = proxyEditor.BuildNode();
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"Invalid value in tab 'proxy': {ex.Message}");
+        }
+
+        var proxyConfig = JsonSerializer.Deserialize<ProxyConfig>(
+                proxyNode?.ToJsonString() ?? "{}",
+                AppConfig.SerializerOptions)
+            ?? throw new InvalidOperationException("Failed to parse proxy configuration.");
+
+        proxyConfig.Validate();
+        v2rayAConfig.Validate();
+
+        var timeoutMs = Math.Clamp(v2rayAConfig.TimeoutMs * 4, 3000, 45000);
+        using var cts = new CancellationTokenSource(timeoutMs);
+        using var logWriter = new StringWriter();
+
+        try
+        {
+            return await V2RayATouchClient.TestConnectionAsync(v2rayAConfig, proxyConfig, logWriter, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TimeoutException($"v2rayA test timed out after {timeoutMs} ms.");
+        }
     }
 
     private void SaveEditorsToConfig()
@@ -260,10 +303,7 @@ internal sealed class ConfigEditorForm : Form
                 _rootObject[sectionName] = sectionNode;
             }
 
-            var serialized = _rootObject.ToJsonString(new JsonSerializerOptions
-            {
-                WriteIndented = true
-            });
+            var serialized = _rootObject.ToJsonString(IndentedJsonOptions);
 
             var config = JsonSerializer.Deserialize<AppConfig>(serialized, AppConfig.SerializerOptions)
                 ?? throw new InvalidOperationException("Failed to parse configuration.");
@@ -319,6 +359,18 @@ internal sealed class ConfigEditorForm : Form
         catch
         {
             return fallback;
+        }
+    }
+
+    private static string ReadOptionalString(JsonObject source, string key, string? fallback = null)
+    {
+        try
+        {
+            return source[key]?.GetValue<string>() ?? fallback ?? string.Empty;
+        }
+        catch
+        {
+            return fallback ?? string.Empty;
         }
     }
 
@@ -540,7 +592,7 @@ internal sealed class ConfigEditorForm : Form
 
         public void Load(JsonNode? sectionNode)
         {
-            _editor.Text = sectionNode?.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) ?? "null";
+            _editor.Text = sectionNode?.ToJsonString(IndentedJsonOptions) ?? "null";
         }
 
         public JsonNode? BuildNode()
@@ -847,6 +899,254 @@ internal sealed class ConfigEditorForm : Form
                 WordWrap = false,
                 Height = 100
             };
+        }
+
+        private void WireDirty(TextBox textBox)
+        {
+            textBox.TextChanged += (_, _) => _markDirty();
+        }
+    }
+
+    private sealed class V2RayASectionEditor : ISectionEditor
+    {
+        private static readonly string[] FieldLabels =
+        [
+            "enabled",
+            "baseUrl",
+            "authorization",
+            "username",
+            "password",
+            "requestId",
+            "timeoutMs",
+            "resolveHostnames",
+            "autoDetectProxyPort",
+            "preferPacPort",
+            "proxyHostOverride",
+            "connectionTest"
+        ];
+
+        private readonly IWin32Window _owner;
+        private readonly Action _markDirty;
+        private readonly Func<V2RayAConfig, Task<(Uri ProxyUri, int ConnectedServerCount)>> _testConnectionAsync;
+        private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
+        private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
+
+        private readonly CheckBox _enabled = new() { AutoSize = true };
+        private readonly TextBox _baseUrl = new();
+        private readonly TextBox _authorization = new();
+        private readonly TextBox _username = new();
+        private readonly TextBox _password = new() { UseSystemPasswordChar = true };
+        private readonly TextBox _requestId = new();
+        private readonly NumericUpDown _timeoutMs = new()
+        {
+            Minimum = 100,
+            Maximum = 120000,
+            DecimalPlaces = 0,
+            Increment = 100
+        };
+        private readonly CheckBox _resolveHostnames = new() { AutoSize = true };
+        private readonly CheckBox _autoDetectProxyPort = new() { AutoSize = true };
+        private readonly CheckBox _preferPacPort = new() { AutoSize = true };
+        private readonly TextBox _proxyHostOverride = new();
+        private readonly Button _testButton = new() { Text = "Test", AutoSize = true };
+        private readonly Control[] _dependentControls;
+        private bool _isTesting;
+
+        public V2RayASectionEditor(
+            IWin32Window owner,
+            Action markDirty,
+            Func<V2RayAConfig, Task<(Uri ProxyUri, int ConnectedServerCount)>> testConnectionAsync)
+        {
+            _owner = owner;
+            _markDirty = markDirty;
+            _testConnectionAsync = testConnectionAsync;
+            _dependentControls =
+            [
+                _baseUrl,
+                _authorization,
+                _username,
+                _password,
+                _requestId,
+                _timeoutMs,
+                _resolveHostnames,
+                _autoDetectProxyPort,
+                _preferPacPort,
+                _proxyHostOverride,
+                _testButton
+            ];
+
+            _panel.Controls.Add(_grid);
+
+            AddRow(_grid, 0, "enabled", _enabled);
+            AddRow(_grid, 1, "baseUrl", _baseUrl);
+            AddRow(_grid, 2, "authorization", _authorization);
+            AddRow(_grid, 3, "username", _username);
+            AddRow(_grid, 4, "password", _password);
+            AddRow(_grid, 5, "requestId", _requestId);
+            AddRow(_grid, 6, "timeoutMs", _timeoutMs);
+            AddRow(_grid, 7, "resolveHostnames", _resolveHostnames);
+            AddRow(_grid, 8, "autoDetectProxyPort", _autoDetectProxyPort);
+            AddRow(_grid, 9, "preferPacPort", _preferPacPort);
+            AddRow(_grid, 10, "proxyHostOverride", _proxyHostOverride);
+
+            var testHost = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                Margin = new Padding(0)
+            };
+            testHost.Controls.Add(_testButton);
+            AddRow(_grid, 11, "connectionTest", testHost);
+
+            _enabled.CheckedChanged += (_, _) =>
+            {
+                UpdateEnabledState();
+                _markDirty();
+            };
+
+            _testButton.Click += async (_, _) => await RunConnectionTestAsync();
+
+            WireDirty(_baseUrl);
+            WireDirty(_authorization);
+            WireDirty(_username);
+            WireDirty(_password);
+            WireDirty(_requestId);
+            _timeoutMs.ValueChanged += (_, _) => _markDirty();
+            _resolveHostnames.CheckedChanged += (_, _) => _markDirty();
+            _autoDetectProxyPort.CheckedChanged += (_, _) => _markDirty();
+            _preferPacPort.CheckedChanged += (_, _) => _markDirty();
+            WireDirty(_proxyHostOverride);
+        }
+
+        public Control RootControl => _panel;
+
+        public void Load(JsonNode? sectionNode)
+        {
+            var defaults = new V2RayAConfig();
+            var obj = sectionNode as JsonObject;
+
+            _enabled.Checked = obj is null ? defaults.Enabled : ReadBool(obj, "enabled", defaults.Enabled);
+            _baseUrl.Text = obj is null ? defaults.BaseUrl : ReadString(obj, "baseUrl", defaults.BaseUrl);
+            _authorization.Text = obj is null
+                ? defaults.Authorization ?? string.Empty
+                : ReadOptionalString(obj, "authorization", defaults.Authorization);
+            _username.Text = obj is null
+                ? defaults.Username ?? string.Empty
+                : ReadOptionalString(obj, "username", defaults.Username);
+            _password.Text = obj is null
+                ? defaults.Password ?? string.Empty
+                : ReadOptionalString(obj, "password", defaults.Password);
+            _requestId.Text = obj is null
+                ? defaults.RequestId ?? string.Empty
+                : ReadOptionalString(obj, "requestId", defaults.RequestId);
+            _timeoutMs.Value = Math.Clamp(
+                obj is null ? defaults.TimeoutMs : ReadInt(obj, "timeoutMs", defaults.TimeoutMs),
+                (int)_timeoutMs.Minimum,
+                (int)_timeoutMs.Maximum);
+            _resolveHostnames.Checked = obj is null
+                ? defaults.ResolveHostnames
+                : ReadBool(obj, "resolveHostnames", defaults.ResolveHostnames);
+            _autoDetectProxyPort.Checked = obj is null
+                ? defaults.AutoDetectProxyPort
+                : ReadBool(obj, "autoDetectProxyPort", defaults.AutoDetectProxyPort);
+            _preferPacPort.Checked = obj is null
+                ? defaults.PreferPacPort
+                : ReadBool(obj, "preferPacPort", defaults.PreferPacPort);
+            _proxyHostOverride.Text = obj is null
+                ? defaults.ProxyHostOverride ?? string.Empty
+                : ReadOptionalString(obj, "proxyHostOverride", defaults.ProxyHostOverride);
+
+            UpdateEnabledState();
+        }
+
+        public JsonNode BuildNode()
+        {
+            return new JsonObject
+            {
+                ["enabled"] = _enabled.Checked,
+                ["baseUrl"] = _baseUrl.Text.Trim(),
+                ["authorization"] = _authorization.Text.Trim(),
+                ["username"] = _username.Text.Trim(),
+                ["password"] = _password.Text.Trim(),
+                ["requestId"] = _requestId.Text.Trim(),
+                ["timeoutMs"] = (int)_timeoutMs.Value,
+                ["resolveHostnames"] = _resolveHostnames.Checked,
+                ["autoDetectProxyPort"] = _autoDetectProxyPort.Checked,
+                ["preferPacPort"] = _preferPacPort.Checked,
+                ["proxyHostOverride"] = _proxyHostOverride.Text.Trim()
+            };
+        }
+
+        private async Task RunConnectionTestAsync()
+        {
+            if (_isTesting)
+            {
+                return;
+            }
+
+            V2RayAConfig config;
+            try
+            {
+                config = JsonSerializer.Deserialize<V2RayAConfig>(
+                        BuildNode().ToJsonString(),
+                        AppConfig.SerializerOptions)
+                    ?? throw new InvalidOperationException("Failed to parse v2rayA configuration.");
+                config.Validate();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    _owner,
+                    $"v2rayA test failed: {ex.Message}",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
+            _isTesting = true;
+            UpdateEnabledState();
+            var cursor = Cursor.Current;
+            Cursor.Current = Cursors.WaitCursor;
+
+            try
+            {
+                var result = await _testConnectionAsync(config);
+                MessageBox.Show(
+                    _owner,
+                    $"v2rayA test succeeded.{Environment.NewLine}" +
+                    $"Proxy endpoint: {result.ProxyUri}{Environment.NewLine}" +
+                    $"Connected servers: {result.ConnectedServerCount}",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    _owner,
+                    $"v2rayA test failed: {ex.Message}",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            finally
+            {
+                Cursor.Current = cursor;
+                _isTesting = false;
+                UpdateEnabledState();
+            }
+        }
+
+        private void UpdateEnabledState()
+        {
+            _enabled.Enabled = !_isTesting;
+            var enabled = _enabled.Checked && !_isTesting;
+            foreach (var control in _dependentControls)
+            {
+                control.Enabled = enabled;
+            }
         }
 
         private void WireDirty(TextBox textBox)
