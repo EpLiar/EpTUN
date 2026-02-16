@@ -143,7 +143,7 @@ internal sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Width = 1020;
         Height = 640;
-        MinimumSize = new Size(860, 520);
+        MinimumSize = new Size(840, 520);
 
         var root = new TableLayoutPanel
         {
@@ -162,6 +162,7 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Top,
             ColumnCount = 5,
+            RowCount = 1,
             AutoSize = true,
             Margin = new Padding(0)
         };
@@ -181,12 +182,15 @@ internal sealed class MainForm : Form
 
         _configPathTextBox.Dock = DockStyle.Fill;
         _configPathTextBox.Text = configPath;
+        _configPathTextBox.Margin = new Padding(0);
 
         _browseConfigButton.Text = "Browse...";
         _browseConfigButton.AutoSize = true;
+        _browseConfigButton.Margin = new Padding(8, 0, 0, 0);
 
         _openConfigButton.Text = "Open";
         _openConfigButton.AutoSize = true;
+        _openConfigButton.Margin = new Padding(8, 0, 0, 0);
 
         _bypassCnCheckBox.Text = "Bypass CN";
         _bypassCnCheckBox.AutoSize = true;
