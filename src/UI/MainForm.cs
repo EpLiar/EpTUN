@@ -177,25 +177,30 @@ internal sealed class MainForm : Form
             Text = "Config:",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 8, 8, 0)
+            Margin = new Padding(0, 0, 8, 0)
         };
 
-        _configPathTextBox.Dock = DockStyle.Fill;
+        _configPathTextBox.Dock = DockStyle.None;
+        _configPathTextBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
         _configPathTextBox.Text = configPath;
         _configPathTextBox.Margin = new Padding(0);
+        _configPathTextBox.MinimumSize = new Size(120, 26);
+        _configPathTextBox.Font = Font;
 
         _browseConfigButton.Text = "Browse...";
         _browseConfigButton.AutoSize = true;
         _browseConfigButton.Margin = new Padding(8, 0, 0, 0);
+        _browseConfigButton.Anchor = AnchorStyles.Left;
 
         _openConfigButton.Text = "Open";
         _openConfigButton.AutoSize = true;
         _openConfigButton.Margin = new Padding(8, 0, 0, 0);
+        _openConfigButton.Anchor = AnchorStyles.Left;
 
         _bypassCnCheckBox.Text = "Bypass CN";
         _bypassCnCheckBox.AutoSize = true;
         _bypassCnCheckBox.Anchor = AnchorStyles.Left;
-        _bypassCnCheckBox.Margin = new Padding(12, 8, 0, 0);
+        _bypassCnCheckBox.Margin = new Padding(12, 0, 0, 0);
 
         configRow.Controls.Add(configLabel, 0, 0);
         configRow.Controls.Add(_configPathTextBox, 1, 0);

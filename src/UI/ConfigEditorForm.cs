@@ -6,6 +6,8 @@ namespace EpTUN;
 
 internal sealed class ConfigEditorForm : Form
 {
+    private static readonly Font LabelMonoFont = CreateLabelMonoFont();
+
     private readonly string _configPath;
     private readonly Label _pathLabel = new();
     private readonly TabControl _tabControl = new();
@@ -86,6 +88,9 @@ internal sealed class ConfigEditorForm : Form
 
     private void LoadConfigToEditors()
     {
+        var selectedTabName = _tabControl.SelectedTab?.Text;
+        var selectedTabIndex = _tabControl.SelectedIndex;
+
         try
         {
             if (!File.Exists(_configPath))
@@ -98,7 +103,7 @@ internal sealed class ConfigEditorForm : Form
                 ?? throw new InvalidOperationException("Top-level JSON must be an object.");
 
             _rootObject = node;
-            RebuildTabs(node);
+            ReloadTabs(node, selectedTabName, selectedTabIndex);
         }
         catch (Exception ex)
         {
@@ -111,34 +116,109 @@ internal sealed class ConfigEditorForm : Form
         }
     }
 
-    private void RebuildTabs(JsonObject root)
+    private void ReloadTabs(JsonObject root, string? selectedTabName, int selectedTabIndex)
     {
         _isLoading = true;
         try
         {
             _tabControl.SuspendLayout();
-            _tabControl.TabPages.Clear();
-            _sectionEditors.Clear();
-
-            foreach (var (sectionName, sectionValue) in root)
+            if (_sectionEditors.Count == 0 || _tabControl.TabPages.Count == 0)
             {
-                var editor = CreateEditor(sectionName);
-                editor.Load(sectionValue);
-
-                var page = new TabPage(sectionName) { Padding = new Padding(8) };
-                var rootControl = editor.RootControl;
-                rootControl.Dock = DockStyle.Fill;
-                page.Controls.Add(rootControl);
-
-                _tabControl.TabPages.Add(page);
-                _sectionEditors[sectionName] = editor;
+                foreach (var (sectionName, sectionValue) in root)
+                {
+                    AddTabPage(sectionName, sectionValue);
+                }
             }
+            else
+            {
+                UpdateTabsInPlace(root);
+            }
+
+            RestoreSelectedTab(selectedTabName, selectedTabIndex);
         }
         finally
         {
             _tabControl.ResumeLayout();
             _isLoading = false;
             SetDirty(false);
+        }
+    }
+
+    private void AddTabPage(string sectionName, JsonNode? sectionValue)
+    {
+        var editor = CreateEditor(sectionName);
+        editor.Load(sectionValue);
+
+        var page = new TabPage(sectionName) { Padding = new Padding(8) };
+        var rootControl = editor.RootControl;
+        rootControl.Dock = DockStyle.Fill;
+        page.Controls.Add(rootControl);
+
+        _tabControl.TabPages.Add(page);
+        _sectionEditors[sectionName] = editor;
+    }
+
+    private void UpdateTabsInPlace(JsonObject root)
+    {
+        var obsoleteSections = new HashSet<string>(_sectionEditors.Keys, StringComparer.Ordinal);
+
+        foreach (var (sectionName, sectionValue) in root)
+        {
+            if (_sectionEditors.TryGetValue(sectionName, out var editor))
+            {
+                editor.RootControl.SuspendLayout();
+                try
+                {
+                    editor.Load(sectionValue);
+                }
+                finally
+                {
+                    editor.RootControl.ResumeLayout();
+                }
+
+                obsoleteSections.Remove(sectionName);
+            }
+            else
+            {
+                AddTabPage(sectionName, sectionValue);
+            }
+        }
+
+        foreach (var sectionName in obsoleteSections)
+        {
+            if (!_sectionEditors.Remove(sectionName))
+            {
+                continue;
+            }
+
+            var page = _tabControl.TabPages
+                .Cast<TabPage>()
+                .FirstOrDefault(tab => string.Equals(tab.Text, sectionName, StringComparison.Ordinal));
+            if (page is not null)
+            {
+                _tabControl.TabPages.Remove(page);
+                page.Dispose();
+            }
+        }
+    }
+
+    private void RestoreSelectedTab(string? selectedTabName, int selectedTabIndex)
+    {
+        if (!string.IsNullOrWhiteSpace(selectedTabName))
+        {
+            var selectedTab = _tabControl.TabPages
+                .Cast<TabPage>()
+                .FirstOrDefault(tab => string.Equals(tab.Text, selectedTabName, StringComparison.Ordinal));
+            if (selectedTab is not null)
+            {
+                _tabControl.SelectedTab = selectedTab;
+                return;
+            }
+        }
+
+        if (selectedTabIndex >= 0 && selectedTabIndex < _tabControl.TabPages.Count)
+        {
+            _tabControl.SelectedIndex = selectedTabIndex;
         }
     }
 
@@ -311,27 +391,53 @@ internal sealed class ConfigEditorForm : Form
             .ToArray();
     }
 
-    private static TableLayoutPanel CreateGrid(int rows)
+    private static TableLayoutPanel CreateGrid(IReadOnlyList<string> labels)
     {
+        var labelWidth = CalculateLabelColumnWidth(labels);
+
         var table = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 3,
-            RowCount = rows,
+            RowCount = labels.Count,
             Padding = new Padding(0),
             Margin = new Padding(0)
         };
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, labelWidth));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        for (var i = 0; i < rows; i++)
+        for (var i = 0; i < labels.Count; i++)
         {
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         }
 
         return table;
+    }
+
+    private static Font CreateLabelMonoFont()
+    {
+        var baseFont = SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont;
+        var hasConsolas = FontFamily.Families.Any(static family =>
+            string.Equals(family.Name, "Consolas", StringComparison.OrdinalIgnoreCase));
+        return hasConsolas
+            ? new Font("Consolas", baseFont.Size, baseFont.Style)
+            : new Font(FontFamily.GenericMonospace, baseFont.Size, baseFont.Style);
+    }
+
+    private static int CalculateLabelColumnWidth(IReadOnlyList<string> labels)
+    {
+        if (labels.Count == 0)
+        {
+            return 1;
+        }
+
+        var font = LabelMonoFont;
+        var longestLength = labels.Max(static x => x.Length);
+        var extraChars = 2;
+        var charWidth = TextRenderer.MeasureText("W", font, Size.Empty, TextFormatFlags.NoPadding).Width;
+        return Math.Max(charWidth * (longestLength + extraChars), 1);
     }
 
     private static void AddRow(
@@ -344,9 +450,10 @@ internal sealed class ConfigEditorForm : Form
         var label = new Label
         {
             Text = labelText,
+            Font = LabelMonoFont,
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 8, 8, 0)
+            Margin = new Padding(0, 8, 4, 0)
         };
 
         ConfigureInputControlLayout(inputControl);
@@ -360,7 +467,7 @@ internal sealed class ConfigEditorForm : Form
             return;
         }
 
-        actionControl.Margin = new Padding(8, 4, 0, 0);
+        actionControl.Margin = new Padding(6, 4, 0, 0);
         actionControl.Anchor = AnchorStyles.Left;
         table.Controls.Add(actionControl, 2, row);
     }
@@ -445,9 +552,11 @@ internal sealed class ConfigEditorForm : Form
 
     private sealed class ProxySectionEditor : ISectionEditor
     {
+        private static readonly string[] FieldLabels = ["scheme", "host", "port"];
+
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
-        private readonly TableLayoutPanel _grid = CreateGrid(3);
+        private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
         private readonly ComboBox _scheme = CreateCombo(["socks5", "http"]);
         private readonly TextBox _host = new();
         private readonly NumericUpDown _port = new()
@@ -505,9 +614,11 @@ internal sealed class ConfigEditorForm : Form
 
     private sealed class Tun2SocksSectionEditor : ISectionEditor
     {
+        private static readonly string[] FieldLabels = ["executablePath", "argumentsTemplate"];
+
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
-        private readonly TableLayoutPanel _grid = CreateGrid(2);
+        private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
         private readonly TextBox _executablePath = new();
         private readonly TextBox _argumentsTemplate = new()
         {
@@ -576,9 +687,26 @@ internal sealed class ConfigEditorForm : Form
 
     private sealed class VpnSectionEditor : ISectionEditor
     {
+        private static readonly string[] FieldLabels =
+        [
+            "interfaceName",
+            "tunAddress",
+            "tunGateway",
+            "tunMask",
+            "dnsServers (one per line)",
+            "includeCidrs (one per line)",
+            "excludeCidrs (one per line)",
+            "cnDatPath",
+            "bypassCn",
+            "routeMetric",
+            "startupDelayMs",
+            "defaultGatewayOverride",
+            "addBypassRouteForProxyHost"
+        ];
+
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
-        private readonly TableLayoutPanel _grid = CreateGrid(13);
+        private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
 
         private readonly TextBox _interfaceName = new();
         private readonly TextBox _tunAddress = new();
@@ -729,9 +857,11 @@ internal sealed class ConfigEditorForm : Form
 
     private sealed class LoggingSectionEditor : ISectionEditor
     {
+        private static readonly string[] FieldLabels = ["windowLevel", "fileLevel"];
+
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
-        private readonly TableLayoutPanel _grid = CreateGrid(2);
+        private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
         private readonly ComboBox _windowLevel = CreateCombo(["INFO", "WARN", "ERROR", "OFF"]);
         private readonly ComboBox _fileLevel = CreateCombo(["INFO", "WARN", "ERROR", "OFF"]);
 
