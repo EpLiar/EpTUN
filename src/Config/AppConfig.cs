@@ -56,6 +56,9 @@ public sealed class LoggingConfig
     [JsonPropertyName("fileLevel")]
     public string? FileLevel { get; init; } = "INFO";
 
+    [JsonPropertyName("trafficSampleMilliseconds")]
+    public int TrafficSampleMilliseconds { get; init; } = 1000;
+
     public void Validate()
     {
         if (!TryParseLevel(WindowLevel, out _))
@@ -66,6 +69,11 @@ public sealed class LoggingConfig
         if (!TryParseLevel(FileLevel, out _))
         {
             throw new ArgumentException("logging.fileLevel must be INFO, WARN, ERROR, OFF, or NONE.");
+        }
+
+        if (TrafficSampleMilliseconds is < 100 or > 3600000)
+        {
+            throw new ArgumentException("logging.trafficSampleMilliseconds must be in range 100..3600000.");
         }
     }
 

@@ -77,6 +77,7 @@ EpTUN 提供 Windows 图形界面（无控制台窗口）和托盘图标，用�
 - `v2rayA.proxyHostOverride`
 - `logging.windowLevel`（`INFO` / `WARN` / `ERROR` / `OFF` 或 `NONE`，默认 `INFO`）
 - `logging.fileLevel`（`INFO` / `WARN` / `ERROR` / `OFF` 或 `NONE`，默认 `INFO`）
+- `logging.trafficSampleMilliseconds`（流量速率采样窗口，单位毫秒，`100..3600000`，默认 `1000`）
 
 ## 构建
 

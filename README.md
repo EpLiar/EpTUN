@@ -77,6 +77,7 @@ Config fields:
 - `v2rayA.proxyHostOverride`
 - `logging.windowLevel` (`INFO` / `WARN` / `ERROR` / `OFF` or `NONE`, default `INFO`)
 - `logging.fileLevel` (`INFO` / `WARN` / `ERROR` / `OFF` or `NONE`, default `INFO`)
+- `logging.trafficSampleMilliseconds` (traffic speed sampling window in milliseconds, `100..3600000`, default `1000`)
 
 ## Build
 

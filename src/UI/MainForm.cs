@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Net.NetworkInformation;
 using System.Security.Principal;
 using System.Text.Json;
 
@@ -37,9 +38,13 @@ internal sealed class MainForm : Form
 
     private CancellationTokenSource? _sessionCts;
     private Task? _sessionTask;
+    private CancellationTokenSource? _trafficCts;
+    private Task? _trafficTask;
     private bool _isRunning;
     private bool _exitRequested;
     private bool _trayHintShown;
+    private string _baseStatusText = "Status: idle";
+    private string _trafficStatusText = string.Empty;
 
     public MainForm(string configPath)
     {
@@ -115,7 +120,7 @@ internal sealed class MainForm : Form
         if (!IsAdministrator())
         {
             AppendLog("ERROR", "Administrator privileges are required. Restart app and approve UAC.");
-            _statusLabel.Text = "Status: not elevated";
+            SetStatusText("Status: not elevated");
         }
 
         UpdateUiState();
@@ -125,6 +130,7 @@ internal sealed class MainForm : Form
     {
         if (disposing)
         {
+            StopTrafficMonitor();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _appIcon.Dispose();
@@ -132,6 +138,7 @@ internal sealed class MainForm : Form
             _errorWriter.Dispose();
             _fileLogSink?.Dispose();
             _sessionCts?.Dispose();
+            _trafficCts?.Dispose();
         }
 
         base.Dispose(disposing);
@@ -249,7 +256,7 @@ internal sealed class MainForm : Form
         controlRow.Controls.Add(_wrapLogsCheckBox);
 
         _statusLabel.AutoSize = true;
-        _statusLabel.Text = "Status: idle";
+        _statusLabel.Text = _baseStatusText;
         _statusLabel.Margin = new Padding(0, 8, 0, 8);
 
         _logTextBox.Dock = DockStyle.Fill;
@@ -362,7 +369,9 @@ internal sealed class MainForm : Form
         var session = new VpnSession(config, configPath, _logWriter, _errorWriter, bypassCnEnabled);
 
         _isRunning = true;
-        _statusLabel.Text = "Status: running";
+        SetStatusText("Status: running");
+        SetTrafficStatusText(string.Empty);
+        StartTrafficMonitor(config);
         UpdateUiState();
 
         _sessionTask = Task.Run(async () => await session.RunAsync(_sessionCts.Token));
@@ -378,8 +387,9 @@ internal sealed class MainForm : Form
             return;
         }
 
-        _statusLabel.Text = "Status: stopping";
+        SetStatusText("Status: stopping");
         _sessionCts?.Cancel();
+        StopTrafficMonitor();
         UpdateUiState();
         AppendLog("INFO", "Stop signal sent.");
     }
@@ -429,6 +439,7 @@ internal sealed class MainForm : Form
             _sessionCts = null;
             _sessionTask = null;
             _isRunning = false;
+            StopTrafficMonitor();
 
             if (!IsDisposed)
             {
@@ -436,13 +447,13 @@ internal sealed class MainForm : Form
                 {
                     BeginInvoke(new Action(() =>
                     {
-                        _statusLabel.Text = "Status: stopped";
+                        SetStatusText("Status: stopped");
                         UpdateUiState();
                     }));
                 }
                 else
                 {
-                    _statusLabel.Text = "Status: stopped";
+                    SetStatusText("Status: stopped");
                     UpdateUiState();
                 }
             }
@@ -471,6 +482,188 @@ internal sealed class MainForm : Form
         _trayRestartItem.Enabled = _restartButton.Enabled;
         _trayStopItem.Enabled = _stopButton.Enabled;
         _bypassCnCheckBox.Enabled = !_isRunning;
+    }
+
+    private void SetStatusText(string text)
+    {
+        _baseStatusText = text;
+        RefreshStatusLabel();
+    }
+
+    private void SetTrafficStatusText(string text)
+    {
+        _trafficStatusText = text;
+        RefreshStatusLabel();
+    }
+
+    private void RefreshStatusLabel()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(RefreshStatusLabel));
+            return;
+        }
+
+        _statusLabel.Text = string.IsNullOrWhiteSpace(_trafficStatusText)
+            ? _baseStatusText
+            : $"{_baseStatusText} | {_trafficStatusText}";
+    }
+
+    private void StartTrafficMonitor(AppConfig config)
+    {
+        StopTrafficMonitor();
+
+        var sampleIntervalMs = Math.Clamp(config.Logging.TrafficSampleMilliseconds, 100, 3600000);
+        _trafficCts = new CancellationTokenSource();
+        _trafficTask = Task.Run(async () =>
+            await MonitorTrafficAsync(config.Vpn.InterfaceName, sampleIntervalMs, _trafficCts.Token));
+        _ = ObserveTrafficMonitorAsync(_trafficTask);
+
+        AppendLog("INFO", $"Traffic monitor started: interface={config.Vpn.InterfaceName}, interval={sampleIntervalMs}ms.");
+    }
+
+    private void StopTrafficMonitor()
+    {
+        try
+        {
+            _trafficCts?.Cancel();
+        }
+        catch
+        {
+            // Ignore cancellation race during shutdown.
+        }
+
+        _trafficCts?.Dispose();
+        _trafficCts = null;
+        _trafficTask = null;
+        SetTrafficStatusText(string.Empty);
+    }
+
+    private async Task ObserveTrafficMonitorAsync(Task task)
+    {
+        try
+        {
+            await task;
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected when stopping the session.
+        }
+        catch (Exception ex)
+        {
+            AppendLog("WARN", $"Traffic monitor failed: {ex.Message}");
+        }
+    }
+
+    private async Task MonitorTrafficAsync(string interfaceName, int sampleIntervalMs, CancellationToken cancellationToken)
+    {
+        var interval = TimeSpan.FromMilliseconds(sampleIntervalMs);
+        NetworkInterface? networkInterface = null;
+        TrafficSnapshot? lastSnapshot = null;
+        ulong totalBytesReceived = 0;
+        ulong totalBytesSent = 0;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            networkInterface ??= FindInterface(interfaceName);
+            if (networkInterface is null)
+            {
+                SetTrafficStatusText("Traffic: waiting for Wintun interface...");
+                await Task.Delay(interval, cancellationToken);
+                continue;
+            }
+
+            if (!TryReadInterfaceBytes(networkInterface, out var bytesReceived, out var bytesSent))
+            {
+                networkInterface = null;
+                lastSnapshot = null;
+                await Task.Delay(interval, cancellationToken);
+                continue;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            if (lastSnapshot is not null)
+            {
+                var elapsedSeconds = (now - lastSnapshot.Timestamp).TotalSeconds;
+                if (elapsedSeconds > 0)
+                {
+                    var deltaReceived = ComputeCounterDelta(lastSnapshot.BytesReceived, bytesReceived);
+                    var deltaSent = ComputeCounterDelta(lastSnapshot.BytesSent, bytesSent);
+                    totalBytesReceived += deltaReceived;
+                    totalBytesSent += deltaSent;
+
+                    var downRate = deltaReceived / elapsedSeconds;
+                    var upRate = deltaSent / elapsedSeconds;
+                    SetTrafficStatusText(
+                        $"Down {FormatRate(downRate)} | Up {FormatRate(upRate)} | " +
+                        $"Total Down {FormatBytes(totalBytesReceived)} | Total Up {FormatBytes(totalBytesSent)}");
+                }
+            }
+
+            lastSnapshot = new TrafficSnapshot(now, bytesReceived, bytesSent);
+            await Task.Delay(interval, cancellationToken);
+        }
+    }
+
+    private static NetworkInterface? FindInterface(string interfaceName)
+    {
+        return NetworkInterface.GetAllNetworkInterfaces()
+            .Where(ni => string.Equals(ni.Name, interfaceName, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(ni => ni.OperationalStatus == OperationalStatus.Up)
+            .FirstOrDefault();
+    }
+
+    private static bool TryReadInterfaceBytes(NetworkInterface networkInterface, out ulong bytesReceived, out ulong bytesSent)
+    {
+        try
+        {
+            var stats = networkInterface.GetIPStatistics();
+            bytesReceived = (ulong)Math.Max(0, stats.BytesReceived);
+            bytesSent = (ulong)Math.Max(0, stats.BytesSent);
+            return true;
+        }
+        catch
+        {
+            bytesReceived = 0;
+            bytesSent = 0;
+            return false;
+        }
+    }
+
+    private static ulong ComputeCounterDelta(ulong previous, ulong current)
+    {
+        return current >= previous ? current - previous : 0;
+    }
+
+    private static string FormatRate(double bytesPerSecond)
+    {
+        return $"{FormatByteSize(bytesPerSecond)}/s";
+    }
+
+    private static string FormatBytes(ulong bytes)
+    {
+        return FormatByteSize(bytes);
+    }
+
+    private static string FormatByteSize(double bytes)
+    {
+        var value = Math.Max(0, bytes);
+        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        var unit = 0;
+
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+
+        var decimals = unit == 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
+        return $"{value.ToString($"F{decimals}")} {units[unit]}";
     }
 
     private static async Task<AppConfig> LoadConfigAsync(string configPath)
@@ -854,6 +1047,8 @@ internal sealed class MainForm : Form
             }
         }
     }
+
+    private sealed record TrafficSnapshot(DateTimeOffset Timestamp, ulong BytesReceived, ulong BytesSent);
 
     private static bool IsAdministrator()
     {

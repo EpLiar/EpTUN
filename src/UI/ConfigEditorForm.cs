@@ -1157,13 +1157,19 @@ internal sealed class ConfigEditorForm : Form
 
     private sealed class LoggingSectionEditor : ISectionEditor
     {
-        private static readonly string[] FieldLabels = ["windowLevel", "fileLevel"];
+        private static readonly string[] FieldLabels = ["windowLevel", "fileLevel", "trafficSampleMilliseconds"];
 
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
         private readonly ComboBox _windowLevel = CreateCombo(["INFO", "WARN", "ERROR", "OFF"]);
         private readonly ComboBox _fileLevel = CreateCombo(["INFO", "WARN", "ERROR", "OFF"]);
+        private readonly NumericUpDown _trafficSampleMilliseconds = new()
+        {
+            Minimum = 100,
+            Maximum = 3600000,
+            DecimalPlaces = 0
+        };
 
         public LoggingSectionEditor(Action markDirty)
         {
@@ -1172,9 +1178,11 @@ internal sealed class ConfigEditorForm : Form
 
             AddRow(_grid, 0, "windowLevel", _windowLevel);
             AddRow(_grid, 1, "fileLevel", _fileLevel);
+            AddRow(_grid, 2, "trafficSampleMilliseconds", _trafficSampleMilliseconds);
 
             _windowLevel.SelectedIndexChanged += (_, _) => _markDirty();
             _fileLevel.SelectedIndexChanged += (_, _) => _markDirty();
+            _trafficSampleMilliseconds.ValueChanged += (_, _) => _markDirty();
         }
 
         public Control RootControl => _panel;
@@ -1190,9 +1198,22 @@ internal sealed class ConfigEditorForm : Form
             var file = obj is null
                 ? defaults.FileLevel ?? "INFO"
                 : ReadString(obj, "fileLevel", defaults.FileLevel ?? "INFO");
+            var sampleMilliseconds = defaults.TrafficSampleMilliseconds;
+            if (obj is not null)
+            {
+                sampleMilliseconds = ReadInt(obj, "trafficSampleMilliseconds", defaults.TrafficSampleMilliseconds);
+                if (!obj.ContainsKey("trafficSampleMilliseconds") && obj.ContainsKey("trafficSampleSeconds"))
+                {
+                    sampleMilliseconds = ReadInt(obj, "trafficSampleSeconds", 1) * 1000;
+                }
+            }
 
             SetComboValue(_windowLevel, window);
             SetComboValue(_fileLevel, file);
+            _trafficSampleMilliseconds.Value = Math.Clamp(
+                sampleMilliseconds,
+                (int)_trafficSampleMilliseconds.Minimum,
+                (int)_trafficSampleMilliseconds.Maximum);
         }
 
         public JsonNode BuildNode()
@@ -1200,7 +1221,8 @@ internal sealed class ConfigEditorForm : Form
             return new JsonObject
             {
                 ["windowLevel"] = _windowLevel.SelectedItem?.ToString() ?? "INFO",
-                ["fileLevel"] = _fileLevel.SelectedItem?.ToString() ?? "INFO"
+                ["fileLevel"] = _fileLevel.SelectedItem?.ToString() ?? "INFO",
+                ["trafficSampleMilliseconds"] = (int)_trafficSampleMilliseconds.Value
             };
         }
 
