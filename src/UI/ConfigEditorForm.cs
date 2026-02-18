@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Net;
 
 namespace EpTUN;
 
@@ -232,7 +233,7 @@ internal sealed class ConfigEditorForm : Form
         {
             "proxy" => new ProxySectionEditor(MarkDirty),
             "tun2Socks" => new Tun2SocksSectionEditor(this, MarkDirty),
-            "vpn" => new VpnSectionEditor(this, MarkDirty),
+            "vpn" => new VpnSectionEditor(this, _configPath, MarkDirty),
             "logging" => new LoggingSectionEditor(MarkDirty),
             "v2rayA" => new V2RayASectionEditor(this, MarkDirty, TestV2RayAConnectionAsync),
             _ => new RawJsonSectionEditor(MarkDirty)
@@ -442,6 +443,281 @@ internal sealed class ConfigEditorForm : Form
             .Where(static x => x.Length > 0)
             .ToArray();
     }
+
+    private static V2RayOutboundImportResult ParseV2RayOutboundsToExcludeCidrs(string configPath)
+    {
+        var json = File.ReadAllText(configPath, Encoding.UTF8);
+        var root = JsonNode.Parse(json) as JsonObject
+            ?? throw new InvalidOperationException("v2ray-core config top-level JSON must be an object.");
+        if (root["outbounds"] is not JsonArray outbounds)
+        {
+            throw new InvalidOperationException("v2ray-core config does not contain an 'outbounds' array.");
+        }
+
+        var addressCandidates = new List<string>();
+        foreach (var outbound in outbounds)
+        {
+            CollectAddressCandidates(outbound, addressCandidates);
+        }
+
+        var routes = new HashSet<CidrRoute>();
+        var domainCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var skipped = 0;
+        foreach (var address in addressCandidates)
+        {
+            if (TryParseAddressOrCidr(address, out var route))
+            {
+                routes.Add(route);
+                continue;
+            }
+
+            if (TryExtractHost(address, out var host))
+            {
+                if (IPAddress.TryParse(host, out var ip))
+                {
+                    routes.Add(CidrRoute.Parse(ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                        ? $"{ip}/32"
+                        : $"{ip}/128"));
+                }
+                else
+                {
+                    domainCandidates.Add(host);
+                }
+            }
+            else
+            {
+                skipped++;
+            }
+        }
+
+        var resolvedDomains = 0;
+        var failedDomains = 0;
+        foreach (var domain in domainCandidates)
+        {
+            if (TryResolveDomainToRoutes(domain, out var resolvedRoutes))
+            {
+                foreach (var route in resolvedRoutes)
+                {
+                    routes.Add(route);
+                }
+
+                resolvedDomains++;
+            }
+            else
+            {
+                failedDomains++;
+            }
+        }
+
+        var ordered = routes
+            .OrderBy(static x => x.IsIPv6)
+            .ThenBy(static x => x.Network, StringComparer.Ordinal)
+            .ThenBy(static x => x.PrefixLength)
+            .ToArray();
+
+        return new V2RayOutboundImportResult(
+            ordered,
+            addressCandidates.Count,
+            skipped,
+            domainCandidates.Count,
+            resolvedDomains,
+            failedDomains);
+    }
+
+    private static void CollectAddressCandidates(JsonNode? node, List<string> output)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var property in obj)
+                {
+                    if (property.Key.Equals("address", StringComparison.OrdinalIgnoreCase))
+                    {
+                        CollectAddressValue(property.Value, output);
+                        continue;
+                    }
+
+                    CollectAddressCandidates(property.Value, output);
+                }
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                {
+                    CollectAddressCandidates(item, output);
+                }
+                break;
+        }
+    }
+
+    private static void CollectAddressValue(JsonNode? valueNode, List<string> output)
+    {
+        switch (valueNode)
+        {
+            case JsonValue scalar when scalar.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text):
+                output.Add(text.Trim());
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                {
+                    if (item is JsonValue itemValue &&
+                        itemValue.TryGetValue<string>(out var itemText) &&
+                        !string.IsNullOrWhiteSpace(itemText))
+                    {
+                        output.Add(itemText.Trim());
+                    }
+                }
+                break;
+        }
+    }
+
+    private static bool TryParseAddressOrCidr(string value, out CidrRoute route)
+    {
+        route = default;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var text = value.Trim();
+        if (text.Contains('/', StringComparison.Ordinal))
+        {
+            try
+            {
+                route = CidrRoute.Parse(text);
+                return true;
+            }
+            catch
+            {
+                // Not a CIDR, continue with direct IP parsing.
+            }
+        }
+
+        var normalized = text;
+        if (normalized.StartsWith("[", StringComparison.Ordinal) &&
+            normalized.EndsWith("]", StringComparison.Ordinal) &&
+            normalized.Length > 2)
+        {
+            normalized = normalized[1..^1];
+        }
+
+        if (IPAddress.TryParse(normalized, out var ip))
+        {
+            route = CidrRoute.Parse(ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                ? $"{ip}/32"
+                : $"{ip}/128");
+            return true;
+        }
+
+        if (normalized.Contains("://", StringComparison.Ordinal) &&
+            Uri.TryCreate(normalized, UriKind.Absolute, out var uri) &&
+            IPAddress.TryParse(uri.Host, out ip))
+        {
+            route = CidrRoute.Parse(ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                ? $"{ip}/32"
+                : $"{ip}/128");
+            return true;
+        }
+
+        if (Uri.TryCreate($"tcp://{normalized}", UriKind.Absolute, out var guessedUri) &&
+            IPAddress.TryParse(guessedUri.Host, out ip))
+        {
+            route = CidrRoute.Parse(ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                ? $"{ip}/32"
+                : $"{ip}/128");
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryExtractHost(string value, out string host)
+    {
+        host = string.Empty;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = value.Trim();
+        if (normalized.StartsWith("[", StringComparison.Ordinal) &&
+            normalized.EndsWith("]", StringComparison.Ordinal) &&
+            normalized.Length > 2)
+        {
+            normalized = normalized[1..^1];
+        }
+
+        if (normalized.Contains("://", StringComparison.Ordinal) &&
+            Uri.TryCreate(normalized, UriKind.Absolute, out var uri) &&
+            !string.IsNullOrWhiteSpace(uri.Host))
+        {
+            host = uri.Host;
+            return true;
+        }
+
+        if (Uri.TryCreate($"tcp://{normalized}", UriKind.Absolute, out var guessedUri) &&
+            !string.IsNullOrWhiteSpace(guessedUri.Host))
+        {
+            host = guessedUri.Host;
+            return true;
+        }
+
+        if (normalized.Contains(':', StringComparison.Ordinal) &&
+            Uri.TryCreate($"tcp://{normalized}", UriKind.Absolute, out var withPort) &&
+            !string.IsNullOrWhiteSpace(withPort.Host))
+        {
+            host = withPort.Host;
+            return true;
+        }
+
+        if (!normalized.Contains('/', StringComparison.Ordinal))
+        {
+            host = normalized;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryResolveDomainToRoutes(string domain, out IReadOnlyCollection<CidrRoute> routes)
+    {
+        routes = [];
+        if (string.IsNullOrWhiteSpace(domain))
+        {
+            return false;
+        }
+
+        try
+        {
+            var addresses = Dns.GetHostAddresses(domain.Trim());
+            var resolved = new HashSet<CidrRoute>();
+            foreach (var address in addresses)
+            {
+                if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    resolved.Add(CidrRoute.Parse($"{address}/32"));
+                }
+                else if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+                {
+                    resolved.Add(CidrRoute.Parse($"{address}/128"));
+                }
+            }
+
+            routes = resolved.ToArray();
+            return routes.Count > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private sealed record V2RayOutboundImportResult(
+        IReadOnlyCollection<CidrRoute> Routes,
+        int AddressCandidateCount,
+        int SkippedAddressCount,
+        int DomainCandidateCount,
+        int ResolvedDomainCount,
+        int FailedDomainCount);
 
     private static TableLayoutPanel CreateGrid(IReadOnlyList<string> labels)
     {
@@ -756,6 +1032,8 @@ internal sealed class ConfigEditorForm : Form
             "addBypassRouteForProxyHost"
         ];
 
+        private readonly IWin32Window _owner;
+        private readonly string _appConfigDirectory;
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
@@ -774,8 +1052,11 @@ internal sealed class ConfigEditorForm : Form
         private readonly TextBox _defaultGatewayOverride = new();
         private readonly CheckBox _addBypassRouteForProxyHost = new() { AutoSize = true };
 
-        public VpnSectionEditor(IWin32Window owner, Action markDirty)
+        public VpnSectionEditor(IWin32Window owner, string appConfigPath, Action markDirty)
         {
+            _owner = owner;
+            _appConfigDirectory = Path.GetDirectoryName(Path.GetFullPath(appConfigPath))
+                ?? Environment.CurrentDirectory;
             _markDirty = markDirty;
 
             _grid.Controls.Clear();
@@ -787,7 +1068,13 @@ internal sealed class ConfigEditorForm : Form
             AddRow(_grid, 3, "tunMask", _tunMask);
             AddRow(_grid, 4, "dnsServers (one per line)", _dnsServers);
             AddRow(_grid, 5, "includeCidrs (one per line)", _includeCidrs);
-            AddRow(_grid, 6, "excludeCidrs (one per line)", _excludeCidrs);
+            var importV2RayButton = new Button
+            {
+                Text = "import v2ray config",
+                AutoSize = true
+            };
+            importV2RayButton.Click += (_, _) => ImportV2RayOutbounds();
+            AddExcludeCidrsImportRow(6, importV2RayButton);
 
             var browseButton = new Button
             {
@@ -904,6 +1191,107 @@ internal sealed class ConfigEditorForm : Form
         private void WireDirty(TextBox textBox)
         {
             textBox.TextChanged += (_, _) => _markDirty();
+        }
+
+        private void AddExcludeCidrsImportRow(int row, Button importButton)
+        {
+            var label = new Label
+            {
+                Text = "excludeCidrs (one per line)",
+                Font = LabelMonoFont,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 0)
+            };
+
+            importButton.Margin = new Padding(0, 4, 0, 0);
+            importButton.Anchor = AnchorStyles.Left;
+
+            var labelHost = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 8, 4, 0)
+            };
+            labelHost.Controls.Add(label);
+            labelHost.Controls.Add(importButton);
+
+            ConfigureInputControlLayout(_excludeCidrs);
+
+            _grid.Controls.Add(labelHost, 0, row);
+            _grid.Controls.Add(_excludeCidrs, 1, row);
+            _grid.SetColumnSpan(_excludeCidrs, 2);
+        }
+
+        private void ImportV2RayOutbounds()
+        {
+            var defaultPath = Path.Combine(_appConfigDirectory, "config.json");
+            if (!File.Exists(defaultPath))
+            {
+                defaultPath = Path.Combine(Environment.CurrentDirectory, "config.json");
+            }
+
+            using var dialog = new OpenFileDialog
+            {
+                Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+                CheckFileExists = true,
+                FileName = defaultPath
+            };
+            if (dialog.ShowDialog(_owner) != DialogResult.OK)
+            {
+                return;
+            }
+
+            try
+            {
+                var parsed = ParseV2RayOutboundsToExcludeCidrs(dialog.FileName);
+                var existingLines = SplitLines(_excludeCidrs.Text).ToList();
+                var knownRoutes = new HashSet<CidrRoute>();
+                foreach (var line in existingLines)
+                {
+                    if (TryParseAddressOrCidr(line, out var route))
+                    {
+                        knownRoutes.Add(route);
+                    }
+                }
+
+                var added = 0;
+                foreach (var route in parsed.Routes)
+                {
+                    if (!knownRoutes.Add(route))
+                    {
+                        continue;
+                    }
+
+                    existingLines.Add($"{route.Network}/{route.PrefixLength}");
+                    added++;
+                }
+
+                if (added > 0)
+                {
+                    _excludeCidrs.Text = JoinLines(existingLines);
+                }
+
+                MessageBox.Show(
+                    _owner,
+                    $"Imported {added} new CIDR routes from outbounds.{Environment.NewLine}" +
+                    $"Address candidates: {parsed.AddressCandidateCount}, non-IP skipped: {parsed.SkippedAddressCount}.{Environment.NewLine}" +
+                    $"Domain candidates: {parsed.DomainCandidateCount}, resolved: {parsed.ResolvedDomainCount}, failed: {parsed.FailedDomainCount}.",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    _owner,
+                    $"Failed to import v2ray-core outbounds: {ex.Message}",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
     }
 
