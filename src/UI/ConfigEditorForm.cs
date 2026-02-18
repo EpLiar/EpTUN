@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Net;
+using System.Diagnostics;
 
 namespace EpTUN;
 
@@ -232,7 +233,7 @@ internal sealed class ConfigEditorForm : Form
         return sectionName switch
         {
             "proxy" => new ProxySectionEditor(MarkDirty),
-            "tun2Socks" => new Tun2SocksSectionEditor(this, MarkDirty),
+            "tun2Socks" => new Tun2SocksSectionEditor(this, _configPath, MarkDirty),
             "vpn" => new VpnSectionEditor(this, _configPath, MarkDirty),
             "logging" => new LoggingSectionEditor(MarkDirty),
             "v2rayA" => new V2RayASectionEditor(this, MarkDirty, TestV2RayAConnectionAsync),
@@ -944,6 +945,8 @@ internal sealed class ConfigEditorForm : Form
     {
         private static readonly string[] FieldLabels = ["executablePath", "argumentsTemplate"];
 
+        private readonly IWin32Window _owner;
+        private readonly string _appConfigDirectory;
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
@@ -956,9 +959,14 @@ internal sealed class ConfigEditorForm : Form
             Height = 100,
             Font = new Font("Consolas", 9.0f, FontStyle.Regular, GraphicsUnit.Point)
         };
+        private readonly Button _testButton = new() { Text = "Test", AutoSize = true };
+        private bool _isTesting;
 
-        public Tun2SocksSectionEditor(IWin32Window owner, Action markDirty)
+        public Tun2SocksSectionEditor(IWin32Window owner, string appConfigPath, Action markDirty)
         {
+            _owner = owner;
+            _appConfigDirectory = Path.GetDirectoryName(Path.GetFullPath(appConfigPath))
+                ?? Environment.CurrentDirectory;
             _markDirty = markDirty;
             _panel.Controls.Add(_grid);
 
@@ -981,7 +989,19 @@ internal sealed class ConfigEditorForm : Form
                 }
             };
 
-            AddRow(_grid, 0, "executablePath", _executablePath, browseButton);
+            _testButton.Click += async (_, _) => await TestExecutableAsync();
+            var actionHost = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                Margin = new Padding(0)
+            };
+            actionHost.Controls.Add(browseButton);
+            actionHost.Controls.Add(_testButton);
+
+            AddRow(_grid, 0, "executablePath", _executablePath, actionHost);
             AddRow(_grid, 1, "argumentsTemplate", _argumentsTemplate);
 
             _executablePath.TextChanged += (_, _) => _markDirty();
@@ -1011,6 +1031,171 @@ internal sealed class ConfigEditorForm : Form
                 ["argumentsTemplate"] = _argumentsTemplate.Text
             };
         }
+
+        private async Task TestExecutableAsync()
+        {
+            if (_isTesting)
+            {
+                return;
+            }
+
+            var exePath = ResolveExecutablePath();
+            if (string.IsNullOrWhiteSpace(exePath))
+            {
+                MessageBox.Show(
+                    _owner,
+                    "Please set tun2socks.executablePath first.",
+                    "EpTUN Config Editor",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!File.Exists(exePath))
+            {
+                MessageBox.Show(
+                    _owner,
+                    $"Executable not found:{Environment.NewLine}{exePath}{Environment.NewLine}" +
+                    $"(configured value: {_executablePath.Text.Trim()})",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
+            _isTesting = true;
+            _testButton.Enabled = false;
+            var originalText = _testButton.Text;
+            _testButton.Text = "Testing...";
+
+            try
+            {
+                var probes = new[] { "--version", "-version", "version" };
+                ProcessProbeResult? successful = null;
+
+                foreach (var probe in probes)
+                {
+                    var result = await RunProbeAsync(exePath, probe, timeoutMs: 5000);
+                    if (!string.IsNullOrWhiteSpace(result.Output))
+                    {
+                        successful = result with { ProbeArguments = probe };
+                        break;
+                    }
+                }
+
+                if (successful is null)
+                {
+                    MessageBox.Show(
+                        _owner,
+                        "Executable started but did not return any version/help output.",
+                        "EpTUN Config Editor",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    return;
+                }
+
+                var preview = successful.Output.Length > 500
+                    ? successful.Output[..500] + "..."
+                    : successful.Output;
+                MessageBox.Show(
+                    _owner,
+                    $"Test succeeded with `{successful.ProbeArguments}`.{Environment.NewLine}{Environment.NewLine}{preview}",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    _owner,
+                    $"Executable test failed: {ex.Message}",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            finally
+            {
+                _testButton.Text = originalText;
+                _testButton.Enabled = true;
+                _isTesting = false;
+            }
+        }
+
+        private static async Task<ProcessProbeResult> RunProbeAsync(string executablePath, string arguments, int timeoutMs)
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = executablePath,
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                }
+            };
+
+            if (!process.Start())
+            {
+                throw new InvalidOperationException("Failed to start executable.");
+            }
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+
+            using var cts = new CancellationTokenSource(timeoutMs);
+            try
+            {
+                await process.WaitForExitAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // Ignore kill failures on timeout cleanup.
+                }
+
+                throw new TimeoutException($"Probe `{arguments}` timed out after {timeoutMs}ms.");
+            }
+
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
+            var output = (stdout + Environment.NewLine + stderr).Trim();
+
+            return new ProcessProbeResult(arguments, process.ExitCode, output);
+        }
+
+        private string ResolveExecutablePath()
+        {
+            var configured = _executablePath.Text.Trim();
+            if (string.IsNullOrWhiteSpace(configured))
+            {
+                return string.Empty;
+            }
+
+            if (Path.IsPathRooted(configured))
+            {
+                return Path.GetFullPath(configured);
+            }
+
+            var candidates = new[]
+            {
+                Path.GetFullPath(Path.Combine(_appConfigDirectory, configured)),
+                Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, configured)),
+                Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, configured)),
+                Path.GetFullPath(Path.Combine(_appConfigDirectory, Path.GetFileName(configured))),
+                Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Path.GetFileName(configured)))
+            };
+
+            return candidates.FirstOrDefault(File.Exists) ?? candidates[0];
+        }
+
+        private sealed record ProcessProbeResult(string ProbeArguments, int ExitCode, string Output);
     }
 
     private sealed class VpnSectionEditor : ISectionEditor
@@ -1095,7 +1280,25 @@ internal sealed class ConfigEditorForm : Form
                 }
             };
 
-            AddRow(_grid, 7, "cnDatPath", _cnDatPath, browseButton);
+            var downloadButton = new Button
+            {
+                Text = "Download",
+                AutoSize = true
+            };
+            downloadButton.Click += (_, _) => OpenCnDatDownloadPage();
+
+            var cnDatActionHost = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                Margin = new Padding(0)
+            };
+            cnDatActionHost.Controls.Add(browseButton);
+            cnDatActionHost.Controls.Add(downloadButton);
+
+            AddRow(_grid, 7, "cnDatPath", _cnDatPath, cnDatActionHost);
             AddRow(_grid, 8, "bypassCn", _bypassCn);
             AddRow(_grid, 9, "routeMetric", _routeMetric);
             AddRow(_grid, 10, "startupDelayMs", _startupDelayMs);
@@ -1288,6 +1491,27 @@ internal sealed class ConfigEditorForm : Form
                 MessageBox.Show(
                     _owner,
                     $"Failed to import v2ray-core outbounds: {ex.Message}",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private void OpenCnDatDownloadPage()
+        {
+            try
+            {
+                _ = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "https://github.com/v2fly/geoip/releases",
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    _owner,
+                    $"Failed to open download page: {ex.Message}",
                     "EpTUN Config Editor",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
