@@ -9,6 +9,7 @@ EpTUN 提供 Windows 图形界面（无控制台窗口）和托盘图标，用�
 - [tun2socks](https://github.com/xjasonlyu/tun2socks)
 - [Wintun](https://www.wintun.net/)
 - [v2rayA](https://github.com/v2rayA/v2rayA)
+- [v2ray-core](https://github.com/v2fly/v2ray-core)（可选的出站导入来源）
 - [v2fly/geoip](https://github.com/v2fly/geoip)（`cn.dat` 来源）
 
 ## 运行（GUI）
@@ -36,6 +37,13 @@ EpTUN 提供 Windows 图形界面（无控制台窗口）和托盘图标，用�
 - 将 `cn.dat`（来自 [v2fly/geoip](https://github.com/v2fly/geoip)）放到输出目录（项目已自动复制该文件）。
 - 在 GUI 中勾选 `Bypass CN`。
 - 来自 `cn.dat` 的中国 CIDR 会作为绕行路由添加（不走 VPN 劫持）。
+
+## 导入出站 IP
+
+- 在 VPN Tab 的 `excludeCidrs (one per line)` 中提供 `import v2ray config` 按钮。
+- 读取 [v2ray-core](https://github.com/v2fly/v2ray-core) `config.json` 的 `outbounds[*].address`。
+- 地址为 IP/CIDR 时直接导入。
+- 地址为域名时会先解析 A/AAAA，再以 `/32` 或 `/128` 导入。
 
 ## 流量劫持与路由模型（AsciiDoc）
 

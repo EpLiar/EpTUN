@@ -9,6 +9,7 @@ EpTUN provides a Windows GUI (no console window) and tray icon for [tun2socks](h
 - [tun2socks](https://github.com/xjasonlyu/tun2socks)
 - [Wintun](https://www.wintun.net/)
 - [v2rayA](https://github.com/v2rayA/v2rayA)
+- [v2ray-core](https://github.com/v2fly/v2ray-core) (optional outbound import source)
 - [v2fly/geoip](https://github.com/v2fly/geoip) (`cn.dat` source)
 
 ## Run (GUI)
@@ -36,6 +37,13 @@ When `v2rayA.enabled = true`:
 - Put `cn.dat` (from [v2fly/geoip](https://github.com/v2fly/geoip)) in output directory (project now copies it automatically).
 - Enable `Bypass CN` checkbox in GUI.
 - CN CIDRs from `cn.dat` are added as bypass routes (not hijacked by VPN).
+
+## Import Outbound IPs
+
+- In VPN tab, `excludeCidrs (one per line)` provides `import v2ray config`.
+- It reads [v2ray-core](https://github.com/v2fly/v2ray-core) `config.json` `outbounds[*].address`.
+- IP/CIDR values are imported directly.
+- Domain values are resolved to A/AAAA and imported as `/32` or `/128`.
 
 ## Traffic Hijack / Route Model (AsciiDoc)
 
