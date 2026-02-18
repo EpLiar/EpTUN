@@ -990,18 +990,7 @@ internal sealed class ConfigEditorForm : Form
             };
 
             _testButton.Click += async (_, _) => await TestExecutableAsync();
-            var actionHost = new FlowLayoutPanel
-            {
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                WrapContents = false,
-                FlowDirection = FlowDirection.LeftToRight,
-                Margin = new Padding(0)
-            };
-            actionHost.Controls.Add(browseButton);
-            actionHost.Controls.Add(_testButton);
-
-            AddRow(_grid, 0, "executablePath", _executablePath, actionHost);
+            AddExecutablePathRow(0, browseButton);
             AddRow(_grid, 1, "argumentsTemplate", _argumentsTemplate);
 
             _executablePath.TextChanged += (_, _) => _markDirty();
@@ -1030,6 +1019,49 @@ internal sealed class ConfigEditorForm : Form
                 ["executablePath"] = _executablePath.Text.Trim(),
                 ["argumentsTemplate"] = _argumentsTemplate.Text
             };
+        }
+
+        private void AddExecutablePathRow(int row, Button browseButton)
+        {
+            var label = new Label
+            {
+                Text = "executablePath",
+                Font = LabelMonoFont,
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 4, 4, 0)
+            };
+
+            var rowHost = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 3,
+                RowCount = 1,
+                AutoSize = true,
+                Margin = new Padding(0, 4, 0, 0)
+            };
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            _executablePath.Dock = DockStyle.None;
+            _executablePath.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            _executablePath.Margin = new Padding(0);
+            _executablePath.MinimumSize = new Size(120, 26);
+            _executablePath.Font = _panel.Font;
+
+            browseButton.Margin = new Padding(8, 0, 0, 0);
+            browseButton.Anchor = AnchorStyles.Left;
+            _testButton.Margin = new Padding(8, 0, 0, 0);
+            _testButton.Anchor = AnchorStyles.Left;
+
+            rowHost.Controls.Add(_executablePath, 0, 0);
+            rowHost.Controls.Add(browseButton, 1, 0);
+            rowHost.Controls.Add(_testButton, 2, 0);
+
+            _grid.Controls.Add(label, 0, row);
+            _grid.Controls.Add(rowHost, 1, row);
+            _grid.SetColumnSpan(rowHost, 2);
         }
 
         private async Task TestExecutableAsync()
