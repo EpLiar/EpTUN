@@ -989,8 +989,15 @@ internal sealed class ConfigEditorForm : Form
                 }
             };
 
+            var downloadButton = new Button
+            {
+                Text = "Download",
+                AutoSize = true
+            };
+            downloadButton.Click += (_, _) => OpenTun2SocksDownloadPage();
+
             _testButton.Click += async (_, _) => await TestExecutableAsync();
-            AddExecutablePathRow(0, browseButton);
+            AddExecutablePathRow(0, browseButton, downloadButton);
             AddRow(_grid, 1, "argumentsTemplate", _argumentsTemplate);
 
             _executablePath.TextChanged += (_, _) => _markDirty();
@@ -1021,7 +1028,7 @@ internal sealed class ConfigEditorForm : Form
             };
         }
 
-        private void AddExecutablePathRow(int row, Button browseButton)
+        private void AddExecutablePathRow(int row, Button browseButton, Button downloadButton)
         {
             var label = new Label
             {
@@ -1035,12 +1042,13 @@ internal sealed class ConfigEditorForm : Form
             var rowHost = new TableLayoutPanel
             {
                 Dock = DockStyle.Top,
-                ColumnCount = 3,
+                ColumnCount = 4,
                 RowCount = 1,
                 AutoSize = true,
                 Margin = new Padding(0, 4, 0, 0)
             };
             rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
@@ -1054,14 +1062,38 @@ internal sealed class ConfigEditorForm : Form
             browseButton.Anchor = AnchorStyles.Left;
             _testButton.Margin = new Padding(8, 0, 0, 0);
             _testButton.Anchor = AnchorStyles.Left;
+            downloadButton.Margin = new Padding(8, 0, 0, 0);
+            downloadButton.Anchor = AnchorStyles.Left;
 
             rowHost.Controls.Add(_executablePath, 0, 0);
             rowHost.Controls.Add(browseButton, 1, 0);
             rowHost.Controls.Add(_testButton, 2, 0);
+            rowHost.Controls.Add(downloadButton, 3, 0);
 
             _grid.Controls.Add(label, 0, row);
             _grid.Controls.Add(rowHost, 1, row);
             _grid.SetColumnSpan(rowHost, 2);
+        }
+
+        private void OpenTun2SocksDownloadPage()
+        {
+            try
+            {
+                _ = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "https://github.com/xjasonlyu/tun2socks/releases",
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    _owner,
+                    $"Failed to open download page: {ex.Message}",
+                    "EpTUN Config Editor",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
 
         private async Task TestExecutableAsync()
