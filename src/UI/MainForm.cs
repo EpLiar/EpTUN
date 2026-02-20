@@ -15,7 +15,6 @@ internal sealed class MainForm : Form
     private readonly Button _startButton = new();
     private readonly Button _stopButton = new();
     private readonly Button _restartButton = new();
-    private readonly Button _hideButton = new();
     private readonly Button _clearLogButton = new();
     private readonly CheckBox _wrapLogsCheckBox = new();
     private readonly Label _statusLabel = new();
@@ -236,9 +235,6 @@ internal sealed class MainForm : Form
         _restartButton.Text = "Restart VPN";
         _restartButton.AutoSize = true;
 
-        _hideButton.Text = "Minimize To Tray";
-        _hideButton.AutoSize = true;
-
         _clearLogButton.Text = "Clear Logs";
         _clearLogButton.AutoSize = true;
 
@@ -251,7 +247,6 @@ internal sealed class MainForm : Form
         controlRow.Controls.Add(_startButton);
         controlRow.Controls.Add(_stopButton);
         controlRow.Controls.Add(_restartButton);
-        controlRow.Controls.Add(_hideButton);
         controlRow.Controls.Add(_clearLogButton);
         controlRow.Controls.Add(_wrapLogsCheckBox);
 
@@ -283,7 +278,6 @@ internal sealed class MainForm : Form
         _startButton.Click += async (_, _) => await StartVpnAsync();
         _stopButton.Click += (_, _) => StopVpn();
         _restartButton.Click += async (_, _) => await RestartVpnAsync();
-        _hideButton.Click += (_, _) => HideToTray();
         _clearLogButton.Click += (_, _) => ClearLogs();
         _wrapLogsCheckBox.CheckedChanged += (_, _) => ApplyLogWrapSetting(_wrapLogsCheckBox.Checked);
 
@@ -294,7 +288,6 @@ internal sealed class MainForm : Form
         _trayExitItem.Click += async (_, _) => await ExitApplicationAsync();
         _notifyIcon.DoubleClick += (_, _) => ShowWindow();
 
-        Resize += OnFormResize;
         FormClosing += OnFormClosing;
     }
 
@@ -750,14 +743,6 @@ internal sealed class MainForm : Form
         using var editor = new ConfigEditorForm(configPath);
         _ = editor.ShowDialog(this);
         TryLoadBypassCnSetting(configPath, logErrors: true);
-    }
-
-    private void OnFormResize(object? sender, EventArgs e)
-    {
-        if (WindowState == FormWindowState.Minimized)
-        {
-            HideToTray();
-        }
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
