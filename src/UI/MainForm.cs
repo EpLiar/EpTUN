@@ -12,8 +12,8 @@ internal sealed class MainForm : Form
     private readonly Button _openConfigButton = new();
     private readonly CheckBox _bypassCnCheckBox = new();
     private readonly Button _editConfigButton = new();
-    private readonly Button _startButton = new();
-    private readonly Button _stopButton = new();
+    private readonly Button _startStopButton = new();
+    private readonly Button _reloadConfigButton = new();
     private readonly Button _restartButton = new();
     private readonly Button _clearLogButton = new();
     private readonly CheckBox _wrapLogsCheckBox = new();
@@ -28,10 +28,10 @@ internal sealed class MainForm : Form
     private readonly ToolStripMenuItem _trayExitItem;
 
     private readonly Icon _appIcon;
-    private readonly LogLevelSetting _windowLogLevel;
-    private readonly LogLevelSetting _fileLogLevel;
+    private LogLevelSetting _windowLogLevel;
+    private LogLevelSetting _fileLogLevel;
     private readonly string[] _logLevelLoadWarnings;
-    private readonly FileLogSink? _fileLogSink;
+    private FileLogSink? _fileLogSink;
     private readonly UiLogWriter _logWriter;
     private readonly UiLogWriter _errorWriter;
 
@@ -226,11 +226,11 @@ internal sealed class MainForm : Form
         _editConfigButton.Text = "Config Editor";
         _editConfigButton.AutoSize = true;
 
-        _startButton.Text = "Start VPN";
-        _startButton.AutoSize = true;
+        _startStopButton.Text = "Start VPN";
+        _startStopButton.AutoSize = true;
 
-        _stopButton.Text = "Stop VPN";
-        _stopButton.AutoSize = true;
+        _reloadConfigButton.Text = "Reload Config";
+        _reloadConfigButton.AutoSize = true;
 
         _restartButton.Text = "Restart VPN";
         _restartButton.AutoSize = true;
@@ -244,8 +244,8 @@ internal sealed class MainForm : Form
         _wrapLogsCheckBox.Margin = new Padding(8, 6, 0, 0);
 
         controlRow.Controls.Add(_editConfigButton);
-        controlRow.Controls.Add(_startButton);
-        controlRow.Controls.Add(_stopButton);
+        controlRow.Controls.Add(_startStopButton);
+        controlRow.Controls.Add(_reloadConfigButton);
         controlRow.Controls.Add(_restartButton);
         controlRow.Controls.Add(_clearLogButton);
         controlRow.Controls.Add(_wrapLogsCheckBox);
@@ -275,8 +275,8 @@ internal sealed class MainForm : Form
         _browseConfigButton.Click += OnBrowseConfigClicked;
         _openConfigButton.Click += OnOpenConfigClicked;
         _editConfigButton.Click += OnEditConfigClicked;
-        _startButton.Click += async (_, _) => await StartVpnAsync();
-        _stopButton.Click += (_, _) => StopVpn();
+        _startStopButton.Click += async (_, _) => await ToggleVpnAsync();
+        _reloadConfigButton.Click += async (_, _) => await ReloadConfigAsync();
         _restartButton.Click += async (_, _) => await RestartVpnAsync();
         _clearLogButton.Click += (_, _) => ClearLogs();
         _wrapLogsCheckBox.CheckedChanged += (_, _) => ApplyLogWrapSetting(_wrapLogsCheckBox.Checked);
@@ -289,6 +289,118 @@ internal sealed class MainForm : Form
         _notifyIcon.DoubleClick += (_, _) => ShowWindow();
 
         FormClosing += OnFormClosing;
+    }
+
+    private async Task ToggleVpnAsync()
+    {
+        if (_isRunning)
+        {
+            StopVpn();
+            return;
+        }
+
+        await StartVpnAsync();
+    }
+
+    private async Task ReloadConfigAsync()
+    {
+        var configPath = _configPathTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(configPath))
+        {
+            MessageBox.Show(
+                this,
+                "Please select appsettings.json.",
+                "EpTUN",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        configPath = Path.GetFullPath(configPath);
+        _configPathTextBox.Text = configPath;
+
+        if (!File.Exists(configPath))
+        {
+            MessageBox.Show(
+                this,
+                $"Config file not found:\n{configPath}",
+                "EpTUN",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        AppConfig config;
+        try
+        {
+            config = await LoadConfigAsync(configPath);
+        }
+        catch (Exception ex)
+        {
+            AppendLog("ERROR", $"Config reload failed: {ex.Message}");
+            MessageBox.Show(
+                this,
+                ex.Message,
+                "EpTUN",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return;
+        }
+
+        ApplyReloadableConfig(configPath, config);
+    }
+
+    private void ApplyReloadableConfig(string configPath, AppConfig config)
+    {
+        ApplyLoggingConfig(configPath, config.Logging);
+
+        if (_isRunning)
+        {
+            StartTrafficMonitor(config);
+            AppendLog("INFO",
+                "Config reload applied (runtime): logging.windowLevel, logging.fileLevel, logging.trafficSampleMilliseconds.");
+            AppendLog("INFO",
+                "Restart VPN required for other fields (proxy.*, tun2Socks.*, vpn routing, v2rayA.*).");
+            return;
+        }
+
+        TryLoadBypassCnSetting(configPath, logErrors: true);
+        AppendLog("INFO", "Config reloaded.");
+    }
+
+    private void ApplyLoggingConfig(string configPath, LoggingConfig logging)
+    {
+        var nextWindowLevel = LoggingConfig.ParseLevelOrDefault(logging.WindowLevel);
+        var nextFileLevel = LoggingConfig.ParseLevelOrDefault(logging.FileLevel);
+
+        _windowLogLevel = nextWindowLevel;
+
+        var currentSink = _fileLogSink;
+        if (nextFileLevel == LogLevelSetting.Off)
+        {
+            _fileLogSink = null;
+            _fileLogLevel = nextFileLevel;
+            currentSink?.Dispose();
+            AppendLog("INFO", $"Log levels updated: window>={LoggingConfig.ToText(_windowLogLevel)}, file>=OFF");
+            return;
+        }
+
+        try
+        {
+            var nextSink = FileLogSink.Create(configPath);
+            _fileLogSink = nextSink;
+            _fileLogLevel = nextFileLevel;
+            currentSink?.Dispose();
+            AppendLog("INFO", $"Log levels updated: window>={LoggingConfig.ToText(_windowLogLevel)}, file>={LoggingConfig.ToText(_fileLogLevel)}");
+            AppendLog("INFO", $"Local log file: {_fileLogSink.FilePath}");
+        }
+        catch (Exception ex)
+        {
+            _fileLogSink = currentSink;
+            _fileLogLevel = nextFileLevel;
+            AppendLog("WARN", $"File logging sink update failed, keeping previous sink: {ex.Message}");
+            AppendLog("INFO", $"Log levels updated: window>={LoggingConfig.ToText(_windowLogLevel)}, file>={LoggingConfig.ToText(_fileLogLevel)}");
+        }
     }
 
     private async Task StartVpnAsync()
@@ -467,13 +579,14 @@ internal sealed class MainForm : Form
         }
 
         var elevated = IsAdministrator();
-        _startButton.Enabled = !_isRunning && elevated;
-        _editConfigButton.Enabled = !_isRunning;
-        _stopButton.Enabled = _isRunning;
+        _startStopButton.Enabled = _isRunning || elevated;
+        _startStopButton.Text = _isRunning ? "Stop VPN" : "Start VPN";
+        _editConfigButton.Enabled = true;
+        _reloadConfigButton.Enabled = true;
         _restartButton.Enabled = _isRunning && elevated;
-        _trayStartItem.Enabled = _startButton.Enabled;
+        _trayStartItem.Enabled = !_isRunning && elevated;
         _trayRestartItem.Enabled = _restartButton.Enabled;
-        _trayStopItem.Enabled = _stopButton.Enabled;
+        _trayStopItem.Enabled = _isRunning;
         _bypassCnCheckBox.Enabled = !_isRunning;
     }
 
@@ -742,6 +855,12 @@ internal sealed class MainForm : Form
 
         using var editor = new ConfigEditorForm(configPath);
         _ = editor.ShowDialog(this);
+        if (_isRunning)
+        {
+            _ = ReloadConfigAsync();
+            return;
+        }
+
         TryLoadBypassCnSetting(configPath, logErrors: true);
     }
 
