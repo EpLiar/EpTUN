@@ -582,7 +582,7 @@ internal sealed class MainForm : Form
         _startStopButton.Enabled = _isRunning || elevated;
         _startStopButton.Text = _isRunning ? "Stop VPN" : "Start VPN";
         _editConfigButton.Enabled = true;
-        _reloadConfigButton.Enabled = true;
+        _reloadConfigButton.Enabled = _isRunning;
         _restartButton.Enabled = _isRunning && elevated;
         _trayStartItem.Enabled = !_isRunning && elevated;
         _trayRestartItem.Enabled = _restartButton.Enabled;
