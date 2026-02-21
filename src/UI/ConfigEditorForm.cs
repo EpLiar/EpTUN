@@ -14,7 +14,8 @@ internal sealed class ConfigEditorForm : Form
         WriteIndented = true
     };
 
-    private readonly Localizer _i18n;
+    private UiLanguage _uiLanguage;
+    private Localizer _i18n;
     private readonly string _configPath;
     private readonly Label _pathLabel = new();
     private readonly TabControl _tabControl = new();
@@ -26,11 +27,58 @@ internal sealed class ConfigEditorForm : Form
     private JsonObject _rootObject = new();
     private bool _isDirty;
     private bool _isLoading;
+    private static readonly (string English, string Chinese)[] LocalizedTextPairs =
+    [
+        ("Reload", "重新加载"),
+        ("Save", "保存"),
+        ("Close", "关闭"),
+        ("language", "语言"),
+        ("scheme", "协议"),
+        ("host", "主机"),
+        ("port", "端口"),
+        ("executablePath", "可执行文件路径"),
+        ("wintunDllPath", "Wintun DLL 路径"),
+        ("argumentsTemplate", "启动参数模板"),
+        ("Browse...", "浏览..."),
+        ("Download", "下载"),
+        ("Test", "测试"),
+        ("Testing...", "测试中..."),
+        ("interfaceName", "接口名"),
+        ("tunAddress", "TUN 地址"),
+        ("tunGateway", "TUN 网关"),
+        ("tunMask", "TUN 子网掩码"),
+        ("dnsServers (one per line)", "DNS 服务器（每行一条）"),
+        ("includeCidrs (one per line)", "包含 CIDR（每行一条）"),
+        ("excludeCidrs (one per line)", "排除 CIDR（每行一条）"),
+        ("cnDatPath", "cn.dat 路径"),
+        ("bypassCn", "绕过 CN"),
+        ("routeMetric", "路由跃点"),
+        ("startupDelayMs", "启动延迟（毫秒）"),
+        ("defaultGatewayOverride", "默认网关覆盖"),
+        ("addBypassRouteForProxyHost", "为代理主机添加绕过路由"),
+        ("import v2ray config", "导入 v2ray 配置"),
+        ("enabled", "启用"),
+        ("baseUrl", "基础地址"),
+        ("authorization", "授权令牌"),
+        ("username", "用户名"),
+        ("password", "密码"),
+        ("requestId", "请求 ID"),
+        ("timeoutMs", "超时（毫秒）"),
+        ("resolveHostnames", "解析主机名"),
+        ("autoDetectProxyPort", "自动检测代理端口"),
+        ("preferPacPort", "优先 PAC 端口"),
+        ("proxyHostOverride", "代理主机覆盖"),
+        ("connectionTest", "连接测试"),
+        ("windowLevel", "窗口日志级别"),
+        ("fileLevel", "文件日志级别"),
+        ("trafficSampleMilliseconds", "流量采样间隔（毫秒）")
+    ];
 
     public ConfigEditorForm(string configPath)
     {
         _configPath = configPath;
-        _i18n = new Localizer(UiLanguageResolver.ResolveFromConfigPath(configPath));
+        _uiLanguage = UiLanguageResolver.ResolveFromConfigPath(configPath);
+        _i18n = new Localizer(_uiLanguage);
         LabelMonoFont = CreateLabelFont(_i18n);
         InitializeLayout();
         LoadConfigToEditors();
@@ -113,6 +161,7 @@ internal sealed class ConfigEditorForm : Form
                 ?? throw new InvalidOperationException(T("Top-level JSON must be an object.", "顶层 JSON 必须是对象。"));
 
             EnsureDefaultSections(node);
+            _ = ApplyUiLanguage(ResolveUiLanguageFromRoot(node));
             _rootObject = node;
             ReloadTabs(node, selectedTabKey, selectedTabIndex);
         }
@@ -197,6 +246,15 @@ internal sealed class ConfigEditorForm : Form
                 finally
                 {
                     editor.RootControl.ResumeLayout();
+                }
+
+                var page = _tabControl.TabPages
+                    .Cast<TabPage>()
+                    .FirstOrDefault(tab =>
+                        string.Equals(tab.Tag as string, sectionName, StringComparison.Ordinal));
+                if (page is not null)
+                {
+                    page.Text = GetSectionDisplayName(sectionName);
                 }
 
                 obsoleteSections.Remove(sectionName);
@@ -345,6 +403,9 @@ internal sealed class ConfigEditorForm : Form
             var config = JsonSerializer.Deserialize<AppConfig>(serialized, AppConfig.SerializerOptions)
                 ?? throw new InvalidOperationException(T("Failed to parse configuration.", "解析配置失败。"));
             config.Validate();
+            var selectedTabKey = _tabControl.SelectedTab?.Tag as string;
+            var selectedTabIndex = _tabControl.SelectedIndex;
+            var nextLanguage = UiLanguageResolver.Resolve(config);
 
             File.WriteAllText(
                 _configPath,
@@ -357,6 +418,8 @@ internal sealed class ConfigEditorForm : Form
                 _rootObject = normalizedRoot;
             }
 
+            _ = ApplyUiLanguage(nextLanguage);
+            RestoreSelectedTab(selectedTabKey, selectedTabIndex);
             SetDirty(false);
         }
         catch (Exception ex)
@@ -389,6 +452,159 @@ internal sealed class ConfigEditorForm : Form
     private string T(string english, string chineseSimplified)
     {
         return _i18n.Text(english, chineseSimplified);
+    }
+
+    private bool ApplyUiLanguage(UiLanguage language)
+    {
+        if (language == _uiLanguage)
+        {
+            return false;
+        }
+
+        _uiLanguage = language;
+        _i18n = new Localizer(language);
+        LabelMonoFont = CreateLabelFont(_i18n);
+        Font = CreateEditorUiFont(_i18n);
+        foreach (var editor in _sectionEditors.Values)
+        {
+            editor.ApplyLocalization(_i18n);
+        }
+
+        ApplyLocalizedShellTexts();
+        ApplyLocalizedTextsInPlace();
+        return true;
+    }
+
+    private void ApplyLocalizedShellTexts()
+    {
+        Text = T("EpTUN Config Editor", "EpTUN 配置编辑器");
+        _pathLabel.Text = T($"Config: {_configPath}", $"配置：{_configPath}");
+        _reloadButton.Text = T("Reload", "重新加载");
+        _saveButton.Text = T("Save", "保存");
+        _cancelButton.Text = T("Close", "关闭");
+    }
+
+    private void ApplyLocalizedTextsInPlace()
+    {
+        foreach (TabPage tabPage in _tabControl.TabPages)
+        {
+            if (tabPage.Tag is string sectionName)
+            {
+                tabPage.Text = GetSectionDisplayName(sectionName);
+            }
+
+            ApplyLocalizedControlTextsRecursive(tabPage);
+        }
+
+        RecalculateSectionGridLabelWidths();
+    }
+
+    private void ApplyLocalizedControlTextsRecursive(Control root)
+    {
+        if (root is Label label && !ReferenceEquals(label, _pathLabel))
+        {
+            label.Font = LabelMonoFont;
+            label.Text = TranslateKnownText(label.Text);
+        }
+        else if (root is Button or CheckBox)
+        {
+            root.Text = TranslateKnownText(root.Text);
+        }
+
+        foreach (Control child in root.Controls)
+        {
+            ApplyLocalizedControlTextsRecursive(child);
+        }
+    }
+
+    private string TranslateKnownText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return text;
+        }
+
+        foreach (var (english, chinese) in LocalizedTextPairs)
+        {
+            if (string.Equals(text, english, StringComparison.Ordinal) ||
+                string.Equals(text, chinese, StringComparison.Ordinal))
+            {
+                return _i18n.IsChineseSimplified ? chinese : english;
+            }
+        }
+
+        return text;
+    }
+
+    private void RecalculateSectionGridLabelWidths()
+    {
+        foreach (var editor in _sectionEditors.Values)
+        {
+            foreach (var table in EnumerateTableLayouts(editor.RootControl))
+            {
+                if (table.ColumnStyles.Count == 0 || table.ColumnStyles[0].SizeType != SizeType.Absolute)
+                {
+                    continue;
+                }
+
+                var firstColumnControls = table.Controls
+                    .Cast<Control>()
+                    .Where(control => table.GetCellPosition(control).Column == 0)
+                    .ToArray();
+                if (firstColumnControls.Length == 0)
+                {
+                    continue;
+                }
+
+                var maxWidth = firstColumnControls
+                    .Select(control => control.GetPreferredSize(Size.Empty).Width)
+                    .DefaultIfEmpty(1)
+                    .Max();
+                var padding = TextRenderer.MeasureText("W", LabelMonoFont, Size.Empty, TextFormatFlags.NoPadding).Width * 2;
+                table.ColumnStyles[0].Width = Math.Max(maxWidth + padding, 1);
+            }
+        }
+    }
+
+    private static IEnumerable<TableLayoutPanel> EnumerateTableLayouts(Control root)
+    {
+        var stack = new Stack<Control>();
+        stack.Push(root);
+
+        while (stack.Count > 0)
+        {
+            var control = stack.Pop();
+            if (control is TableLayoutPanel tableLayout)
+            {
+                yield return tableLayout;
+            }
+
+            foreach (Control child in control.Controls)
+            {
+                stack.Push(child);
+            }
+        }
+    }
+
+    private static UiLanguage ResolveUiLanguageFromRoot(JsonObject root)
+    {
+        try
+        {
+            if (root["general"] is JsonObject general)
+            {
+                var normalized = GeneralConfig.NormalizeLanguage(general["language"]?.GetValue<string>());
+                if (normalized == GeneralConfig.ChineseSimplified)
+                {
+                    return UiLanguage.ChineseSimplified;
+                }
+            }
+        }
+        catch
+        {
+            // Ignore parse errors and fallback to English.
+        }
+
+        return UiLanguage.English;
     }
 
     private static string ReadString(JsonObject source, string key, string fallback)
@@ -934,6 +1150,7 @@ internal sealed class ConfigEditorForm : Form
         Control RootControl { get; }
         void Load(JsonNode? sectionNode);
         JsonNode? BuildNode();
+        void ApplyLocalization(Localizer i18n);
     }
 
     private sealed class RawJsonSectionEditor : ISectionEditor
@@ -967,6 +1184,11 @@ internal sealed class ConfigEditorForm : Form
             var text = _editor.Text.Trim();
             return JsonNode.Parse(text);
         }
+
+        public void ApplyLocalization(Localizer i18n)
+        {
+            // No static UI text to localize in raw editor.
+        }
     }
 
     private sealed class GeneralSectionEditor : ISectionEditor
@@ -974,7 +1196,7 @@ internal sealed class ConfigEditorForm : Form
         private static readonly string[] FieldLabels = ["language"];
         private static readonly string[] SupportedLanguages = [GeneralConfig.English, GeneralConfig.ChineseSimplified];
 
-        private readonly Localizer _i18n;
+        private Localizer _i18n;
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
@@ -1024,6 +1246,11 @@ internal sealed class ConfigEditorForm : Form
             combo.SelectedItem = value;
         }
 
+        public void ApplyLocalization(Localizer i18n)
+        {
+            _i18n = i18n;
+        }
+
         private string T(string english, string chineseSimplified)
         {
             return _i18n.Text(english, chineseSimplified);
@@ -1034,7 +1261,7 @@ internal sealed class ConfigEditorForm : Form
     {
         private static readonly string[] FieldLabels = ["scheme", "host", "port"];
 
-        private readonly Localizer _i18n;
+        private Localizer _i18n;
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
@@ -1093,6 +1320,11 @@ internal sealed class ConfigEditorForm : Form
             };
         }
 
+        public void ApplyLocalization(Localizer i18n)
+        {
+            _i18n = i18n;
+        }
+
         private string T(string english, string chineseSimplified)
         {
             return _i18n.Text(english, chineseSimplified);
@@ -1103,7 +1335,7 @@ internal sealed class ConfigEditorForm : Form
     {
         private static readonly string[] FieldLabels = ["executablePath", "wintunDllPath", "argumentsTemplate"];
 
-        private readonly Localizer _i18n;
+        private Localizer _i18n;
         private readonly IWin32Window _owner;
         private readonly string _appConfigDirectory;
         private readonly Action _markDirty;
@@ -1550,6 +1782,11 @@ internal sealed class ConfigEditorForm : Form
         {
             return _i18n.Text(english, chineseSimplified);
         }
+
+        public void ApplyLocalization(Localizer i18n)
+        {
+            _i18n = i18n;
+        }
     }
 
     private sealed class VpnSectionEditor : ISectionEditor
@@ -1571,7 +1808,7 @@ internal sealed class ConfigEditorForm : Form
             "addBypassRouteForProxyHost"
         ];
 
-        private readonly Localizer _i18n;
+        private Localizer _i18n;
         private readonly IWin32Window _owner;
         private readonly string _appConfigDirectory;
         private readonly Action _markDirty;
@@ -1914,6 +2151,11 @@ internal sealed class ConfigEditorForm : Form
         {
             return _i18n.Text(english, chineseSimplified);
         }
+
+        public void ApplyLocalization(Localizer i18n)
+        {
+            _i18n = i18n;
+        }
     }
 
     private sealed class V2RayASectionEditor : ISectionEditor
@@ -1934,7 +2176,7 @@ internal sealed class ConfigEditorForm : Form
             "connectionTest"
         ];
 
-        private readonly Localizer _i18n;
+        private Localizer _i18n;
         private readonly IWin32Window _owner;
         private readonly Action _markDirty;
         private readonly Func<V2RayAConfig, Task<(Uri ProxyUri, int ConnectedServerCount)>> _testConnectionAsync;
@@ -2175,13 +2417,18 @@ internal sealed class ConfigEditorForm : Form
         {
             return _i18n.Text(english, chineseSimplified);
         }
+
+        public void ApplyLocalization(Localizer i18n)
+        {
+            _i18n = i18n;
+        }
     }
 
     private sealed class LoggingSectionEditor : ISectionEditor
     {
         private static readonly string[] FieldLabels = ["windowLevel", "fileLevel", "trafficSampleMilliseconds"];
 
-        private readonly Localizer _i18n;
+        private Localizer _i18n;
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
@@ -2263,6 +2510,11 @@ internal sealed class ConfigEditorForm : Form
         private string T(string english, string chineseSimplified)
         {
             return _i18n.Text(english, chineseSimplified);
+        }
+
+        public void ApplyLocalization(Localizer i18n)
+        {
+            _i18n = i18n;
         }
     }
 }
