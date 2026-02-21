@@ -31,7 +31,7 @@ All other fields require `Restart VPN` to take effect.
 | Object | Purpose |
 | --- | --- |
 | `proxy` | Upstream proxy endpoint for `tun2socks`. |
-| `tun2Socks` | `tun2socks.exe` path and startup arguments template. |
+| `tun2Socks` | `tun2socks.exe` / `wintun.dll` paths and startup arguments template. |
 | `vpn` | Interface, routes, DNS, CN bypass, and route behavior. |
 | `v2rayA` | v2rayA login/ports/touch integration. |
 | `logging` | Window/file log levels and traffic sampling interval. |
@@ -49,6 +49,7 @@ All other fields require `Restart VPN` to take effect.
 | Key | Type | Default | Runtime reload | Description |
 | --- | --- | --- | --- | --- |
 | `tun2Socks.executablePath` | string | `tun2socks.exe` (example file) | No | Path to `tun2socks` binary. |
+| `tun2Socks.wintunDllPath` | string | `wintun.dll` | No | Path to `wintun.dll` source file used before launching `tun2socks`. |
 | `tun2Socks.argumentsTemplate` | string | `-device {interfaceName} -proxy {proxyUri} -loglevel info` | No | Launch args template. Supports placeholders like `{proxyUri}` and `{interfaceName}`. |
 
 ## `vpn`

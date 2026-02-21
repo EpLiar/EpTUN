@@ -650,14 +650,7 @@ public sealed class VpnSession
             return;
         }
 
-        var candidates = new[]
-        {
-            Path.Combine(_configDirectory, "wintun.dll"),
-            Path.Combine(AppContext.BaseDirectory, "wintun.dll"),
-            Path.Combine(Environment.CurrentDirectory, "wintun.dll"),
-            Path.Combine(_configDirectory, "bin", "wintun.dll"),
-            Path.Combine(AppContext.BaseDirectory, "bin", "wintun.dll")
-        }
+        var candidates = ResolveWintunDllCandidates()
         .Select(Path.GetFullPath)
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .Where(File.Exists)
@@ -670,9 +663,38 @@ public sealed class VpnSession
             return;
         }
 
+        var configuredPath = _config.Tun2Socks.WintunDllPath.Trim();
         throw new FileNotFoundException(
-            "wintun.dll not found. Put x64 wintun.dll in the same directory as tun2socks.exe.",
+            $"wintun.dll not found. Checked tun2Socks.wintunDllPath='{configuredPath}' and fallback paths. " +
+            "Put x64 wintun.dll in the same directory as tun2socks.exe or update tun2Socks.wintunDllPath.",
             targetPath);
+    }
+
+    private IEnumerable<string> ResolveWintunDllCandidates()
+    {
+        var candidates = new List<string>();
+        var configured = _config.Tun2Socks.WintunDllPath.Trim();
+
+        if (Path.IsPathRooted(configured))
+        {
+            candidates.Add(configured);
+        }
+        else
+        {
+            candidates.Add(Path.Combine(_configDirectory, configured));
+            candidates.Add(Path.Combine(AppContext.BaseDirectory, configured));
+            candidates.Add(Path.Combine(Environment.CurrentDirectory, configured));
+            candidates.Add(Path.Combine(_configDirectory, Path.GetFileName(configured)));
+            candidates.Add(Path.Combine(AppContext.BaseDirectory, Path.GetFileName(configured)));
+        }
+
+        candidates.Add(Path.Combine(_configDirectory, "wintun.dll"));
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "wintun.dll"));
+        candidates.Add(Path.Combine(Environment.CurrentDirectory, "wintun.dll"));
+        candidates.Add(Path.Combine(_configDirectory, "bin", "wintun.dll"));
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "bin", "wintun.dll"));
+
+        return candidates;
     }
 
     private string BuildTun2SocksArgs(Uri proxyUri)

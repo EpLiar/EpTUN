@@ -7,6 +7,7 @@ namespace EpTUN;
 
 internal sealed class MainForm : Form
 {
+    private readonly Localizer _i18n;
     private readonly TextBox _configPathTextBox = new();
     private readonly Button _browseConfigButton = new();
     private readonly Button _openConfigButton = new();
@@ -42,11 +43,14 @@ internal sealed class MainForm : Form
     private bool _isRunning;
     private bool _exitRequested;
     private bool _trayHintShown;
-    private string _baseStatusText = "Status: idle";
+    private string _baseStatusText = string.Empty;
     private string _trafficStatusText = string.Empty;
 
     public MainForm(string configPath)
     {
+        _i18n = new Localizer(UiLanguageResolver.ResolveFromConfigPath(configPath));
+        _baseStatusText = T("Status: idle", "状态：空闲");
+
         _appIcon = IconLoader.LoadFromPngCandidates();
         Icon = _appIcon;
 
@@ -68,11 +72,11 @@ internal sealed class MainForm : Form
         _logWriter = new UiLogWriter(line => AppendLog("INFO", line));
         _errorWriter = new UiLogWriter(line => AppendLog("ERROR", line));
 
-        _trayShowWindowItem = new ToolStripMenuItem("Show Window");
-        _trayStartItem = new ToolStripMenuItem("Start VPN");
-        _trayRestartItem = new ToolStripMenuItem("Restart VPN");
-        _trayStopItem = new ToolStripMenuItem("Stop VPN");
-        _trayExitItem = new ToolStripMenuItem("Exit");
+        _trayShowWindowItem = new ToolStripMenuItem(T("Show Window", "显示窗口"));
+        _trayStartItem = new ToolStripMenuItem(T("Start VPN", "启动 VPN"));
+        _trayRestartItem = new ToolStripMenuItem(T("Restart VPN", "重启 VPN"));
+        _trayStopItem = new ToolStripMenuItem(T("Stop VPN", "停止 VPN"));
+        _trayExitItem = new ToolStripMenuItem(T("Exit", "退出"));
 
         _notifyIcon = new NotifyIcon
         {
@@ -96,19 +100,22 @@ internal sealed class MainForm : Form
         HookEvents();
         TryLoadBypassCnSetting(configPath, logErrors: false);
 
-        AppendLog("INFO", "UI ready.");
-        AppendLog("INFO", $"Log levels: window>={LoggingConfig.ToText(_windowLogLevel)}, file>={LoggingConfig.ToText(_fileLogLevel)}");
+        AppendLog("INFO", T("UI ready.", "界面已就绪。"));
+        AppendLog("INFO",
+            T(
+                $"Log levels: window>={LoggingConfig.ToText(_windowLogLevel)}, file>={LoggingConfig.ToText(_fileLogLevel)}",
+                $"日志级别：窗口>={LoggingConfig.ToText(_windowLogLevel)}，文件>={LoggingConfig.ToText(_fileLogLevel)}"));
         if (_fileLogSink is not null)
         {
-            AppendLog("INFO", $"Local log file: {_fileLogSink.FilePath}");
+            AppendLog("INFO", T($"Local log file: {_fileLogSink.FilePath}", $"本地日志文件：{_fileLogSink.FilePath}"));
         }
         else if (_fileLogLevel == LogLevelSetting.Off)
         {
-            AppendLog("INFO", "Local file logging is disabled by logging.fileLevel.");
+            AppendLog("INFO", T("Local file logging is disabled by logging.fileLevel.", "logging.fileLevel 已禁用本地文件日志。"));
         }
         else if (!string.IsNullOrWhiteSpace(fileLogInitError))
         {
-            AppendLog("WARN", $"Local file logging disabled: {fileLogInitError}");
+            AppendLog("WARN", T($"Local file logging disabled: {fileLogInitError}", $"本地文件日志不可用：{fileLogInitError}"));
         }
 
         foreach (var warning in _logLevelLoadWarnings)
@@ -118,8 +125,8 @@ internal sealed class MainForm : Form
 
         if (!IsAdministrator())
         {
-            AppendLog("ERROR", "Administrator privileges are required. Restart app and approve UAC.");
-            SetStatusText("Status: not elevated");
+            AppendLog("ERROR", T("Administrator privileges are required. Restart app and approve UAC.", "需要管理员权限。请重启程序并通过 UAC 授权。"));
+            SetStatusText(T("Status: not elevated", "状态：未提权"));
         }
 
         UpdateUiState();
@@ -180,7 +187,7 @@ internal sealed class MainForm : Form
 
         var configLabel = new Label
         {
-            Text = "Config:",
+            Text = T("Config:", "配置："),
             AutoSize = true,
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 0, 8, 0)
@@ -193,17 +200,17 @@ internal sealed class MainForm : Form
         _configPathTextBox.MinimumSize = new Size(120, 26);
         _configPathTextBox.Font = Font;
 
-        _browseConfigButton.Text = "Browse...";
+        _browseConfigButton.Text = T("Browse...", "浏览...");
         _browseConfigButton.AutoSize = true;
         _browseConfigButton.Margin = new Padding(8, 0, 0, 0);
         _browseConfigButton.Anchor = AnchorStyles.Left;
 
-        _openConfigButton.Text = "Open";
+        _openConfigButton.Text = T("Open", "打开");
         _openConfigButton.AutoSize = true;
         _openConfigButton.Margin = new Padding(8, 0, 0, 0);
         _openConfigButton.Anchor = AnchorStyles.Left;
 
-        _bypassCnCheckBox.Text = "Bypass CN";
+        _bypassCnCheckBox.Text = T("Bypass CN", "绕过 CN");
         _bypassCnCheckBox.AutoSize = true;
         _bypassCnCheckBox.Anchor = AnchorStyles.Left;
         _bypassCnCheckBox.Margin = new Padding(12, 0, 0, 0);
@@ -223,22 +230,22 @@ internal sealed class MainForm : Form
             Margin = new Padding(0, 8, 0, 0)
         };
 
-        _editConfigButton.Text = "Config Editor";
+        _editConfigButton.Text = T("Config Editor", "配置编辑器");
         _editConfigButton.AutoSize = true;
 
-        _startStopButton.Text = "Start VPN";
+        _startStopButton.Text = T("Start VPN", "启动 VPN");
         _startStopButton.AutoSize = true;
 
-        _reloadConfigButton.Text = "Reload Config";
+        _reloadConfigButton.Text = T("Reload Config", "重新加载配置");
         _reloadConfigButton.AutoSize = true;
 
-        _restartButton.Text = "Restart VPN";
+        _restartButton.Text = T("Restart VPN", "重启 VPN");
         _restartButton.AutoSize = true;
 
-        _clearLogButton.Text = "Clear Logs";
+        _clearLogButton.Text = T("Clear Logs", "清空日志");
         _clearLogButton.AutoSize = true;
 
-        _wrapLogsCheckBox.Text = "Wrap Logs";
+        _wrapLogsCheckBox.Text = T("Wrap Logs", "日志换行");
         _wrapLogsCheckBox.AutoSize = true;
         _wrapLogsCheckBox.Checked = true;
         _wrapLogsCheckBox.Margin = new Padding(8, 6, 0, 0);
@@ -259,7 +266,7 @@ internal sealed class MainForm : Form
         _logTextBox.ReadOnly = true;
         _logTextBox.ScrollBars = ScrollBars.Vertical;
         _logTextBox.WordWrap = true;
-        _logTextBox.Font = new Font("Consolas", 9.0f, FontStyle.Regular, GraphicsUnit.Point);
+        _logTextBox.Font = CreateLogTextFont();
 
         root.Controls.Add(configRow, 0, 0);
         root.Controls.Add(controlRow, 0, 1);
@@ -309,7 +316,7 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(
                 this,
-                "Please select appsettings.json.",
+                T("Please select appsettings.json.", "请选择 appsettings.json。"),
                 "EpTUN",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -323,7 +330,7 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(
                 this,
-                $"Config file not found:\n{configPath}",
+                T($"Config file not found:\n{configPath}", $"未找到配置文件：\n{configPath}"),
                 "EpTUN",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -337,7 +344,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLog("ERROR", $"Config reload failed: {ex.Message}");
+            AppendLog("ERROR", T($"Config reload failed: {ex.Message}", $"配置重载失败：{ex.Message}"));
             MessageBox.Show(
                 this,
                 ex.Message,
@@ -358,14 +365,18 @@ internal sealed class MainForm : Form
         {
             StartTrafficMonitor(config);
             AppendLog("INFO",
-                "Config reload applied (runtime): logging.windowLevel, logging.fileLevel, logging.trafficSampleMilliseconds.");
+                T(
+                    "Config reload applied (runtime): logging.windowLevel, logging.fileLevel, logging.trafficSampleMilliseconds.",
+                    "配置热重载已应用（运行时）：logging.windowLevel、logging.fileLevel、logging.trafficSampleMilliseconds。"));
             AppendLog("INFO",
-                "Restart VPN required for other fields (proxy.*, tun2Socks.*, vpn routing, v2rayA.*).");
+                T(
+                    "Restart VPN required for other fields (proxy.*, tun2Socks.*, vpn routing, v2rayA.*).",
+                    "其他字段（proxy.*、tun2Socks.*、vpn 路由、v2rayA.*）需要重启 VPN 才会生效。"));
             return;
         }
 
         TryLoadBypassCnSetting(configPath, logErrors: true);
-        AppendLog("INFO", "Config reloaded.");
+        AppendLog("INFO", T("Config reloaded.", "配置已重载。"));
     }
 
     private void ApplyLoggingConfig(string configPath, LoggingConfig logging)
@@ -381,7 +392,10 @@ internal sealed class MainForm : Form
             _fileLogSink = null;
             _fileLogLevel = nextFileLevel;
             currentSink?.Dispose();
-            AppendLog("INFO", $"Log levels updated: window>={LoggingConfig.ToText(_windowLogLevel)}, file>=OFF");
+            AppendLog("INFO",
+                T(
+                    $"Log levels updated: window>={LoggingConfig.ToText(_windowLogLevel)}, file>=OFF",
+                    $"日志级别已更新：窗口>={LoggingConfig.ToText(_windowLogLevel)}，文件>=OFF"));
             return;
         }
 
@@ -391,15 +405,24 @@ internal sealed class MainForm : Form
             _fileLogSink = nextSink;
             _fileLogLevel = nextFileLevel;
             currentSink?.Dispose();
-            AppendLog("INFO", $"Log levels updated: window>={LoggingConfig.ToText(_windowLogLevel)}, file>={LoggingConfig.ToText(_fileLogLevel)}");
-            AppendLog("INFO", $"Local log file: {_fileLogSink.FilePath}");
+            AppendLog("INFO",
+                T(
+                    $"Log levels updated: window>={LoggingConfig.ToText(_windowLogLevel)}, file>={LoggingConfig.ToText(_fileLogLevel)}",
+                    $"日志级别已更新：窗口>={LoggingConfig.ToText(_windowLogLevel)}，文件>={LoggingConfig.ToText(_fileLogLevel)}"));
+            AppendLog("INFO", T($"Local log file: {_fileLogSink.FilePath}", $"本地日志文件：{_fileLogSink.FilePath}"));
         }
         catch (Exception ex)
         {
             _fileLogSink = currentSink;
             _fileLogLevel = nextFileLevel;
-            AppendLog("WARN", $"File logging sink update failed, keeping previous sink: {ex.Message}");
-            AppendLog("INFO", $"Log levels updated: window>={LoggingConfig.ToText(_windowLogLevel)}, file>={LoggingConfig.ToText(_fileLogLevel)}");
+            AppendLog("WARN",
+                T(
+                    $"File logging sink update failed, keeping previous sink: {ex.Message}",
+                    $"文件日志写入器更新失败，保留旧写入器：{ex.Message}"));
+            AppendLog("INFO",
+                T(
+                    $"Log levels updated: window>={LoggingConfig.ToText(_windowLogLevel)}, file>={LoggingConfig.ToText(_fileLogLevel)}",
+                    $"日志级别已更新：窗口>={LoggingConfig.ToText(_windowLogLevel)}，文件>={LoggingConfig.ToText(_fileLogLevel)}"));
         }
     }
 
@@ -414,7 +437,7 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(
                 this,
-                "Administrator privileges are required.",
+                T("Administrator privileges are required.", "需要管理员权限。"),
                 "EpTUN",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -426,7 +449,7 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(
                 this,
-                "Please select appsettings.json.",
+                T("Please select appsettings.json.", "请选择 appsettings.json。"),
                 "EpTUN",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -440,7 +463,7 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(
                 this,
-                $"Config file not found:\n{configPath}",
+                T($"Config file not found:\n{configPath}", $"未找到配置文件：\n{configPath}"),
                 "EpTUN",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -467,14 +490,14 @@ internal sealed class MainForm : Form
         var bypassCnEnabled = _bypassCnCheckBox.Checked;
         if (bypassCnEnabled)
         {
-            AppendLog("INFO", "Bypass CN is enabled.");
+            AppendLog("INFO", T("Bypass CN is enabled.", "Bypass CN 已启用。"));
         }
 
         _sessionCts = new CancellationTokenSource();
         var session = new VpnSession(config, configPath, _logWriter, _errorWriter, bypassCnEnabled);
 
         _isRunning = true;
-        SetStatusText("Status: running");
+        SetStatusText(T("Status: running", "状态：运行中"));
         SetTrafficStatusText(string.Empty);
         StartTrafficMonitor(config);
         UpdateUiState();
@@ -482,7 +505,7 @@ internal sealed class MainForm : Form
         _sessionTask = Task.Run(async () => await session.RunAsync(_sessionCts.Token));
         _ = ObserveSessionAsync(_sessionTask);
 
-        AppendLog("INFO", "VPN session started.");
+        AppendLog("INFO", T("VPN session started.", "VPN 会话已启动。"));
     }
 
     private void StopVpn()
@@ -492,11 +515,11 @@ internal sealed class MainForm : Form
             return;
         }
 
-        SetStatusText("Status: stopping");
+        SetStatusText(T("Status: stopping", "状态：停止中"));
         _sessionCts?.Cancel();
         StopTrafficMonitor();
         UpdateUiState();
-        AppendLog("INFO", "Stop signal sent.");
+        AppendLog("INFO", T("Stop signal sent.", "已发送停止信号。"));
     }
 
     private async Task RestartVpnAsync()
@@ -516,7 +539,7 @@ internal sealed class MainForm : Form
 
         if (_isRunning)
         {
-            AppendLog("ERROR", "Restart timed out: previous VPN session is still stopping.");
+            AppendLog("ERROR", T("Restart timed out: previous VPN session is still stopping.", "重启超时：上一个 VPN 会话仍在停止中。"));
             return;
         }
 
@@ -528,15 +551,15 @@ internal sealed class MainForm : Form
         try
         {
             await task;
-            AppendLog("INFO", "VPN session stopped.");
+            AppendLog("INFO", T("VPN session stopped.", "VPN 会话已停止。"));
         }
         catch (OperationCanceledException)
         {
-            AppendLog("INFO", "VPN session canceled.");
+            AppendLog("INFO", T("VPN session canceled.", "VPN 会话已取消。"));
         }
         catch (Exception ex)
         {
-            AppendLog("ERROR", $"VPN session failed: {ex.Message}");
+            AppendLog("ERROR", T($"VPN session failed: {ex.Message}", $"VPN 会话失败：{ex.Message}"));
         }
         finally
         {
@@ -552,13 +575,13 @@ internal sealed class MainForm : Form
                 {
                     BeginInvoke(new Action(() =>
                     {
-                        SetStatusText("Status: stopped");
+                        SetStatusText(T("Status: stopped", "状态：已停止"));
                         UpdateUiState();
                     }));
                 }
                 else
                 {
-                    SetStatusText("Status: stopped");
+                    SetStatusText(T("Status: stopped", "状态：已停止"));
                     UpdateUiState();
                 }
             }
@@ -580,7 +603,9 @@ internal sealed class MainForm : Form
 
         var elevated = IsAdministrator();
         _startStopButton.Enabled = _isRunning || elevated;
-        _startStopButton.Text = _isRunning ? "Stop VPN" : "Start VPN";
+        _startStopButton.Text = _isRunning
+            ? T("Stop VPN", "停止 VPN")
+            : T("Start VPN", "启动 VPN");
         _editConfigButton.Enabled = true;
         _reloadConfigButton.Enabled = _isRunning;
         _restartButton.Enabled = _isRunning && elevated;
@@ -630,7 +655,10 @@ internal sealed class MainForm : Form
             await MonitorTrafficAsync(config.Vpn.InterfaceName, sampleIntervalMs, _trafficCts.Token));
         _ = ObserveTrafficMonitorAsync(_trafficTask);
 
-        AppendLog("INFO", $"Traffic monitor started: interface={config.Vpn.InterfaceName}, interval={sampleIntervalMs}ms.");
+        AppendLog("INFO",
+            T(
+                $"Traffic monitor started: interface={config.Vpn.InterfaceName}, interval={sampleIntervalMs}ms.",
+                $"流量监控已启动：接口={config.Vpn.InterfaceName}，采样间隔={sampleIntervalMs}ms。"));
     }
 
     private void StopTrafficMonitor()
@@ -662,7 +690,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            AppendLog("WARN", $"Traffic monitor failed: {ex.Message}");
+            AppendLog("WARN", T($"Traffic monitor failed: {ex.Message}", $"流量监控失败：{ex.Message}"));
         }
     }
 
@@ -679,7 +707,7 @@ internal sealed class MainForm : Form
             networkInterface ??= FindInterface(interfaceName);
             if (networkInterface is null)
             {
-                SetTrafficStatusText("Traffic: waiting for Wintun interface...");
+                SetTrafficStatusText(T("Traffic: waiting for Wintun interface...", "流量：等待 Wintun 接口..."));
                 await Task.Delay(interval, cancellationToken);
                 continue;
             }
@@ -706,8 +734,11 @@ internal sealed class MainForm : Form
                     var downRate = deltaReceived / elapsedSeconds;
                     var upRate = deltaSent / elapsedSeconds;
                     SetTrafficStatusText(
-                        $"Down {FormatRate(downRate)} | Up {FormatRate(upRate)} | " +
-                        $"Total Down {FormatBytes(totalBytesReceived)} | Total Up {FormatBytes(totalBytesSent)}");
+                        T(
+                            $"Down {FormatRate(downRate)} | Up {FormatRate(upRate)} | " +
+                            $"Total Down {FormatBytes(totalBytesReceived)} | Total Up {FormatBytes(totalBytesSent)}",
+                            $"下行 {FormatRate(downRate)} | 上行 {FormatRate(upRate)} | " +
+                            $"累计下行 {FormatBytes(totalBytesReceived)} | 累计上行 {FormatBytes(totalBytesSent)}"));
                 }
             }
 
@@ -786,7 +817,7 @@ internal sealed class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+            Filter = T("JSON files (*.json)|*.json|All files (*.*)|*.*", "JSON 文件 (*.json)|*.json|所有文件 (*.*)|*.*"),
             FileName = _configPathTextBox.Text,
             CheckFileExists = true
         };
@@ -811,7 +842,7 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(
                 this,
-                $"Config file not found:\n{configPath}",
+                T($"Config file not found:\n{configPath}", $"未找到配置文件：\n{configPath}"),
                 "EpTUN",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -833,7 +864,7 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(
                 this,
-                "Please select appsettings.json.",
+                T("Please select appsettings.json.", "请选择 appsettings.json。"),
                 "EpTUN",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -846,7 +877,7 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(
                 this,
-                $"Config file not found:\n{configPath}",
+                T($"Config file not found:\n{configPath}", $"未找到配置文件：\n{configPath}"),
                 "EpTUN",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
@@ -887,7 +918,7 @@ internal sealed class MainForm : Form
                 {
                     var force = MessageBox.Show(
                         this,
-                        "VPN is still stopping. Exit anyway?",
+                        T("VPN is still stopping. Exit anyway?", "VPN 仍在停止中，是否强制退出？"),
                         "EpTUN",
                         MessageBoxButtons.YesNo,
                         MessageBoxIcon.Warning);
@@ -911,7 +942,7 @@ internal sealed class MainForm : Form
         if (!_trayHintShown)
         {
             _notifyIcon.BalloonTipTitle = "EpTUN";
-            _notifyIcon.BalloonTipText = "Running in tray. Double-click tray icon to open.";
+            _notifyIcon.BalloonTipText = T("Running in tray. Double-click tray icon to open.", "程序已最小化到托盘，双击托盘图标可打开。");
             _notifyIcon.ShowBalloonTip(1500);
             _trayHintShown = true;
         }
@@ -1025,7 +1056,7 @@ internal sealed class MainForm : Form
         }
     }
 
-    private static (LogLevelSetting WindowLevel, LogLevelSetting FileLevel, string[] Warnings) ResolveLogLevelSettings(string configPath)
+    private (LogLevelSetting WindowLevel, LogLevelSetting FileLevel, string[] Warnings) ResolveLogLevelSettings(string configPath)
     {
         var warnings = new List<string>();
         var windowLevel = LogLevelSetting.Info;
@@ -1052,25 +1083,25 @@ internal sealed class MainForm : Form
             var config = JsonSerializer.Deserialize<AppConfig>(json, AppConfig.SerializerOptions);
             if (config is null)
             {
-                warnings.Add("Failed to parse config for logging levels. Falling back to INFO.");
+                warnings.Add(T("Failed to parse config for logging levels. Falling back to INFO.", "解析日志级别配置失败，已回退到 INFO。"));
                 return (windowLevel, fileLevel, warnings.ToArray());
             }
 
             if (!LoggingConfig.TryParseLevel(config.Logging.WindowLevel, out windowLevel))
             {
-                warnings.Add("Invalid logging.windowLevel. Use INFO/WARN/ERROR/OFF (or NONE). Falling back to INFO.");
+                warnings.Add(T("Invalid logging.windowLevel. Use INFO/WARN/ERROR/OFF (or NONE). Falling back to INFO.", "logging.windowLevel 无效。请使用 INFO/WARN/ERROR/OFF（或 NONE），已回退到 INFO。"));
                 windowLevel = LogLevelSetting.Info;
             }
 
             if (!LoggingConfig.TryParseLevel(config.Logging.FileLevel, out fileLevel))
             {
-                warnings.Add("Invalid logging.fileLevel. Use INFO/WARN/ERROR/OFF (or NONE). Falling back to INFO.");
+                warnings.Add(T("Invalid logging.fileLevel. Use INFO/WARN/ERROR/OFF (or NONE). Falling back to INFO.", "logging.fileLevel 无效。请使用 INFO/WARN/ERROR/OFF（或 NONE），已回退到 INFO。"));
                 fileLevel = LogLevelSetting.Info;
             }
         }
         catch (Exception ex)
         {
-            warnings.Add($"Failed to read logging levels. Falling back to INFO. {ex.Message}");
+            warnings.Add(T($"Failed to read logging levels. Falling back to INFO. {ex.Message}", $"读取日志级别失败，已回退到 INFO。{ex.Message}"));
         }
 
         return (windowLevel, fileLevel, warnings.ToArray());
@@ -1140,16 +1171,25 @@ internal sealed class MainForm : Form
             _bypassCnCheckBox.Checked = config.Vpn.BypassCn;
             if (logErrors)
             {
-                AppendLog("INFO", $"Bypass CN default: {(config.Vpn.BypassCn ? "enabled" : "disabled")}");
+                AppendLog(
+                    "INFO",
+                    T(
+                        $"Bypass CN default: {(config.Vpn.BypassCn ? "enabled" : "disabled")}",
+                        $"Bypass CN 默认值：{(config.Vpn.BypassCn ? "启用" : "禁用")}"));
             }
         }
         catch (Exception ex)
         {
             if (logErrors)
             {
-                AppendLog("ERROR", $"Failed to read bypass CN setting: {ex.Message}");
+                AppendLog("ERROR", T($"Failed to read bypass CN setting: {ex.Message}", $"读取 Bypass CN 配置失败：{ex.Message}"));
             }
         }
+    }
+
+    private string T(string english, string chineseSimplified)
+    {
+        return _i18n.Text(english, chineseSimplified);
     }
 
     private sealed record TrafficSnapshot(DateTimeOffset Timestamp, ulong BytesReceived, ulong BytesSent);
@@ -1159,6 +1199,52 @@ internal sealed class MainForm : Form
         using var identity = WindowsIdentity.GetCurrent();
         var principal = new WindowsPrincipal(identity);
         return principal.IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private Font CreateLogTextFont()
+    {
+        const float size = 9.0f;
+        const FontStyle style = FontStyle.Regular;
+        var monoFamily = FindInstalledFontFamilyName("Cascadia Mono", "Cascadia Code", "Consolas");
+
+        if (_i18n.IsChineseSimplified)
+        {
+            var preferredChineseFamily = FindInstalledFontFamilyName(
+                "Microsoft YaHei UI",
+                "Microsoft YaHei",
+                "微软雅黑",
+                "Noto Sans SC",
+                "Noto Sans CJK SC",
+                "DengXian",
+                "等线",
+                "SimSun",
+                "宋体",
+                "SimHei",
+                "黑体");
+            if (!string.IsNullOrWhiteSpace(preferredChineseFamily))
+            {
+                return new Font(preferredChineseFamily, size, style, GraphicsUnit.Point);
+            }
+        }
+
+        return !string.IsNullOrWhiteSpace(monoFamily)
+            ? new Font(monoFamily, size, style, GraphicsUnit.Point)
+            : new Font(FontFamily.GenericMonospace, size, style, GraphicsUnit.Point);
+    }
+
+    private static string? FindInstalledFontFamilyName(params string[] candidateNames)
+    {
+        foreach (var candidate in candidateNames)
+        {
+            var found = FontFamily.Families.FirstOrDefault(family =>
+                string.Equals(family.Name, candidate, StringComparison.OrdinalIgnoreCase));
+            if (found is not null)
+            {
+                return found.Name;
+            }
+        }
+
+        return null;
     }
 }
 

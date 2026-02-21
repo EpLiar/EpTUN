@@ -31,7 +31,7 @@ VPN 运行期间点击 `Reload Config`（或关闭 Config Editor 后自动触发
 | 对象 | 作用 |
 | --- | --- |
 | `proxy` | `tun2socks` 的上游代理地址。 |
-| `tun2Socks` | `tun2socks.exe` 路径和启动参数模板。 |
+| `tun2Socks` | `tun2socks.exe` / `wintun.dll` 路径和启动参数模板。 |
 | `vpn` | 网卡、路由、DNS、CN 绕行等设置。 |
 | `v2rayA` | v2rayA 登录、端口探测、动态路由集成。 |
 | `logging` | 窗口/文件日志等级和流量采样间隔。 |
@@ -49,6 +49,7 @@ VPN 运行期间点击 `Reload Config`（或关闭 Config Editor 后自动触发
 | 键 | 类型 | 默认值 | 运行中重载 | 说明 |
 | --- | --- | --- | --- | --- |
 | `tun2Socks.executablePath` | string | `tun2socks.exe`（示例配置） | 否 | `tun2socks` 可执行文件路径。 |
+| `tun2Socks.wintunDllPath` | string | `wintun.dll` | 否 | `wintun.dll` 源文件路径，启动 `tun2socks` 前会优先从该路径查找。 |
 | `tun2Socks.argumentsTemplate` | string | `-device {interfaceName} -proxy {proxyUri} -loglevel info` | 否 | 启动参数模板，支持 `{proxyUri}`、`{interfaceName}` 等占位符。 |
 
 ## `vpn`

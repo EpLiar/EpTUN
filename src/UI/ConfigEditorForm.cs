@@ -8,12 +8,13 @@ namespace EpTUN;
 
 internal sealed class ConfigEditorForm : Form
 {
-    private static readonly Font LabelMonoFont = CreateLabelMonoFont();
+    private static Font LabelMonoFont = CreateDefaultLabelFont();
     private static readonly JsonSerializerOptions IndentedJsonOptions = new(AppConfig.SerializerOptions)
     {
         WriteIndented = true
     };
 
+    private readonly Localizer _i18n;
     private readonly string _configPath;
     private readonly Label _pathLabel = new();
     private readonly TabControl _tabControl = new();
@@ -29,17 +30,20 @@ internal sealed class ConfigEditorForm : Form
     public ConfigEditorForm(string configPath)
     {
         _configPath = configPath;
+        _i18n = new Localizer(UiLanguageResolver.ResolveFromConfigPath(configPath));
+        LabelMonoFont = CreateLabelFont(_i18n);
         InitializeLayout();
         LoadConfigToEditors();
     }
 
     private void InitializeLayout()
     {
-        Text = "EpTUN Config Editor";
+        Text = T("EpTUN Config Editor", "EpTUN 配置编辑器");
         StartPosition = FormStartPosition.CenterParent;
         Width = 980;
         Height = 700;
         MinimumSize = new Size(760, 520);
+        Font = CreateEditorUiFont(_i18n);
 
         var root = new TableLayoutPanel
         {
@@ -53,7 +57,7 @@ internal sealed class ConfigEditorForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         _pathLabel.AutoSize = true;
-        _pathLabel.Text = $"Config: {_configPath}";
+        _pathLabel.Text = T($"Config: {_configPath}", $"配置：{_configPath}");
         _pathLabel.Margin = new Padding(0, 0, 0, 8);
 
         _tabControl.Dock = DockStyle.Fill;
@@ -67,14 +71,14 @@ internal sealed class ConfigEditorForm : Form
             Margin = new Padding(0, 8, 0, 0)
         };
 
-        _reloadButton.Text = "Reload";
+        _reloadButton.Text = T("Reload", "重新加载");
         _reloadButton.AutoSize = true;
 
-        _saveButton.Text = "Save";
+        _saveButton.Text = T("Save", "保存");
         _saveButton.AutoSize = true;
         _saveButton.Enabled = false;
 
-        _cancelButton.Text = "Close";
+        _cancelButton.Text = T("Close", "关闭");
         _cancelButton.AutoSize = true;
 
         actionRow.Controls.Add(_cancelButton);
@@ -94,35 +98,44 @@ internal sealed class ConfigEditorForm : Form
 
     private void LoadConfigToEditors()
     {
-        var selectedTabName = _tabControl.SelectedTab?.Text;
+        var selectedTabKey = _tabControl.SelectedTab?.Tag as string;
         var selectedTabIndex = _tabControl.SelectedIndex;
 
         try
         {
             if (!File.Exists(_configPath))
             {
-                throw new FileNotFoundException($"Config file not found: {_configPath}");
+                throw new FileNotFoundException(T($"Config file not found: {_configPath}", $"未找到配置文件：{_configPath}"));
             }
 
             var json = File.ReadAllText(_configPath, Encoding.UTF8);
             var node = JsonNode.Parse(json) as JsonObject
-                ?? throw new InvalidOperationException("Top-level JSON must be an object.");
+                ?? throw new InvalidOperationException(T("Top-level JSON must be an object.", "顶层 JSON 必须是对象。"));
 
+            EnsureDefaultSections(node);
             _rootObject = node;
-            ReloadTabs(node, selectedTabName, selectedTabIndex);
+            ReloadTabs(node, selectedTabKey, selectedTabIndex);
         }
         catch (Exception ex)
         {
             MessageBox.Show(
                 this,
                 ex.Message,
-                "EpTUN Config Editor",
+                T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }
     }
 
-    private void ReloadTabs(JsonObject root, string? selectedTabName, int selectedTabIndex)
+    private static void EnsureDefaultSections(JsonObject root)
+    {
+        if (!root.ContainsKey("general"))
+        {
+            root["general"] = new JsonObject();
+        }
+    }
+
+    private void ReloadTabs(JsonObject root, string? selectedTabKey, int selectedTabIndex)
     {
         _isLoading = true;
         try
@@ -140,7 +153,7 @@ internal sealed class ConfigEditorForm : Form
                 UpdateTabsInPlace(root);
             }
 
-            RestoreSelectedTab(selectedTabName, selectedTabIndex);
+            RestoreSelectedTab(selectedTabKey, selectedTabIndex);
         }
         finally
         {
@@ -155,7 +168,11 @@ internal sealed class ConfigEditorForm : Form
         var editor = CreateEditor(sectionName);
         editor.Load(sectionValue);
 
-        var page = new TabPage(sectionName) { Padding = new Padding(8) };
+        var page = new TabPage(GetSectionDisplayName(sectionName))
+        {
+            Padding = new Padding(8),
+            Tag = sectionName
+        };
         var rootControl = editor.RootControl;
         rootControl.Dock = DockStyle.Fill;
         page.Controls.Add(rootControl);
@@ -199,7 +216,8 @@ internal sealed class ConfigEditorForm : Form
 
             var page = _tabControl.TabPages
                 .Cast<TabPage>()
-                .FirstOrDefault(tab => string.Equals(tab.Text, sectionName, StringComparison.Ordinal));
+                .FirstOrDefault(tab =>
+                    string.Equals(tab.Tag as string, sectionName, StringComparison.Ordinal));
             if (page is not null)
             {
                 _tabControl.TabPages.Remove(page);
@@ -208,13 +226,14 @@ internal sealed class ConfigEditorForm : Form
         }
     }
 
-    private void RestoreSelectedTab(string? selectedTabName, int selectedTabIndex)
+    private void RestoreSelectedTab(string? selectedTabKey, int selectedTabIndex)
     {
-        if (!string.IsNullOrWhiteSpace(selectedTabName))
+        if (!string.IsNullOrWhiteSpace(selectedTabKey))
         {
             var selectedTab = _tabControl.TabPages
                 .Cast<TabPage>()
-                .FirstOrDefault(tab => string.Equals(tab.Text, selectedTabName, StringComparison.Ordinal));
+                .FirstOrDefault(tab =>
+                    string.Equals(tab.Tag as string, selectedTabKey, StringComparison.Ordinal));
             if (selectedTab is not null)
             {
                 _tabControl.SelectedTab = selectedTab;
@@ -232,12 +251,28 @@ internal sealed class ConfigEditorForm : Form
     {
         return sectionName switch
         {
-            "proxy" => new ProxySectionEditor(MarkDirty),
-            "tun2Socks" => new Tun2SocksSectionEditor(this, _configPath, MarkDirty),
-            "vpn" => new VpnSectionEditor(this, _configPath, MarkDirty),
-            "logging" => new LoggingSectionEditor(MarkDirty),
-            "v2rayA" => new V2RayASectionEditor(this, MarkDirty, TestV2RayAConnectionAsync),
+            "general" => new GeneralSectionEditor(MarkDirty, _i18n),
+            "proxy" => new ProxySectionEditor(MarkDirty, _i18n),
+            "tun2Socks" => new Tun2SocksSectionEditor(this, _configPath, MarkDirty, _i18n),
+            "vpn" => new VpnSectionEditor(this, _configPath, MarkDirty, _i18n),
+            "logging" => new LoggingSectionEditor(MarkDirty, _i18n),
+            "v2rayA" => new V2RayASectionEditor(this, MarkDirty, _i18n, TestV2RayAConnectionAsync),
             _ => new RawJsonSectionEditor(MarkDirty)
+        };
+    }
+
+    private string GetSectionDisplayName(string sectionName)
+    {
+        if (!_i18n.IsChineseSimplified)
+        {
+            return sectionName;
+        }
+
+        return sectionName switch
+        {
+            "general" => "通用",
+            "logging" => "日志",
+            _ => sectionName
         };
     }
 
@@ -245,7 +280,7 @@ internal sealed class ConfigEditorForm : Form
     {
         if (!_sectionEditors.TryGetValue("proxy", out var proxyEditor))
         {
-            throw new InvalidOperationException("proxy section is required for v2rayA test.");
+            throw new InvalidOperationException(T("proxy section is required for v2rayA test.", "v2rayA 测试依赖 proxy 分区。"));
         }
 
         JsonNode? proxyNode;
@@ -255,13 +290,13 @@ internal sealed class ConfigEditorForm : Form
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException($"Invalid value in tab 'proxy': {ex.Message}");
+            throw new InvalidOperationException(T($"Invalid value in tab 'proxy': {ex.Message}", $"Tab 'proxy' 中的值无效：{ex.Message}"));
         }
 
         var proxyConfig = JsonSerializer.Deserialize<ProxyConfig>(
                 proxyNode?.ToJsonString() ?? "{}",
                 AppConfig.SerializerOptions)
-            ?? throw new InvalidOperationException("Failed to parse proxy configuration.");
+            ?? throw new InvalidOperationException(T("Failed to parse proxy configuration.", "解析 proxy 配置失败。"));
 
         proxyConfig.Validate();
         v2rayAConfig.Validate();
@@ -276,7 +311,7 @@ internal sealed class ConfigEditorForm : Form
         }
         catch (OperationCanceledException)
         {
-            throw new TimeoutException($"v2rayA test timed out after {timeoutMs} ms.");
+            throw new TimeoutException(T($"v2rayA test timed out after {timeoutMs} ms.", $"v2rayA 测试超时（{timeoutMs} ms）。"));
         }
     }
 
@@ -299,7 +334,7 @@ internal sealed class ConfigEditorForm : Form
                 catch (Exception ex)
                 {
                     throw new InvalidOperationException(
-                        $"Invalid value in tab '{sectionName}': {ex.Message}");
+                        T($"Invalid value in tab '{sectionName}': {ex.Message}", $"Tab '{sectionName}' 中的值无效：{ex.Message}"));
                 }
 
                 _rootObject[sectionName] = sectionNode;
@@ -308,7 +343,7 @@ internal sealed class ConfigEditorForm : Form
             var serialized = _rootObject.ToJsonString(IndentedJsonOptions);
 
             var config = JsonSerializer.Deserialize<AppConfig>(serialized, AppConfig.SerializerOptions)
-                ?? throw new InvalidOperationException("Failed to parse configuration.");
+                ?? throw new InvalidOperationException(T("Failed to parse configuration.", "解析配置失败。"));
             config.Validate();
 
             File.WriteAllText(
@@ -329,7 +364,7 @@ internal sealed class ConfigEditorForm : Form
             MessageBox.Show(
                 this,
                 ex.Message,
-                "EpTUN Config Editor",
+                T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }
@@ -349,6 +384,11 @@ internal sealed class ConfigEditorForm : Form
     {
         _isDirty = value;
         _saveButton.Enabled = _isDirty;
+    }
+
+    private string T(string english, string chineseSimplified)
+    {
+        return _i18n.Text(english, chineseSimplified);
     }
 
     private static string ReadString(JsonObject source, string key, string fallback)
@@ -745,14 +785,13 @@ internal sealed class ConfigEditorForm : Form
         return table;
     }
 
-    private static Font CreateLabelMonoFont()
+    private static Font CreateDefaultLabelFont()
     {
         var baseFont = SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont;
-        var hasConsolas = FontFamily.Families.Any(static family =>
-            string.Equals(family.Name, "Consolas", StringComparison.OrdinalIgnoreCase));
-        return hasConsolas
-            ? new Font("Consolas", baseFont.Size, baseFont.Style)
-            : new Font(FontFamily.GenericMonospace, baseFont.Size, baseFont.Style);
+        var familyName = FindInstalledFontFamilyName("Cascadia Mono", "Cascadia Code", "Consolas");
+        return !string.IsNullOrWhiteSpace(familyName)
+            ? new Font(familyName, baseFont.Size, baseFont.Style, GraphicsUnit.Point)
+            : baseFont;
     }
 
     private static int CalculateLabelColumnWidth(IReadOnlyList<string> labels)
@@ -763,10 +802,61 @@ internal sealed class ConfigEditorForm : Form
         }
 
         var font = LabelMonoFont;
-        var longestLength = labels.Max(static x => x.Length);
-        var extraChars = 2;
-        var charWidth = TextRenderer.MeasureText("W", font, Size.Empty, TextFormatFlags.NoPadding).Width;
-        return Math.Max(charWidth * (longestLength + extraChars), 1);
+        var maxMeasured = labels
+            .Select(label => TextRenderer.MeasureText(label, font, Size.Empty, TextFormatFlags.NoPadding).Width)
+            .DefaultIfEmpty(1)
+            .Max();
+        var padding = TextRenderer.MeasureText("W", font, Size.Empty, TextFormatFlags.NoPadding).Width * 2;
+        return Math.Max(maxMeasured + padding, 1);
+    }
+
+    private static Font CreateLabelFont(Localizer i18n)
+    {
+        var baseFont = SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont;
+
+        if (i18n.IsChineseSimplified)
+        {
+            var chineseFamilyName = FindInstalledFontFamilyName(
+                "Microsoft YaHei UI",
+                "Microsoft YaHei",
+                "微软雅黑",
+                "Noto Sans SC",
+                "Noto Sans CJK SC",
+                "DengXian",
+                "等线",
+                "SimSun",
+                "宋体");
+
+            if (!string.IsNullOrWhiteSpace(chineseFamilyName))
+            {
+                return new Font(chineseFamilyName, baseFont.Size, baseFont.Style, GraphicsUnit.Point);
+            }
+        }
+
+        var monoFamilyName = FindInstalledFontFamilyName("Cascadia Mono", "Cascadia Code", "Consolas");
+        return !string.IsNullOrWhiteSpace(monoFamilyName)
+            ? new Font(monoFamilyName, baseFont.Size, baseFont.Style, GraphicsUnit.Point)
+            : baseFont;
+    }
+
+    private static Font CreateEditorUiFont(Localizer i18n)
+    {
+        return CreateLabelFont(i18n);
+    }
+
+    private static string? FindInstalledFontFamilyName(params string[] candidateNames)
+    {
+        foreach (var candidate in candidateNames)
+        {
+            var family = FontFamily.Families.FirstOrDefault(installed =>
+                string.Equals(installed.Name, candidate, StringComparison.OrdinalIgnoreCase));
+            if (family is not null)
+            {
+                return family.Name;
+            }
+        }
+
+        return null;
     }
 
     private static void AddRow(
@@ -879,10 +969,72 @@ internal sealed class ConfigEditorForm : Form
         }
     }
 
+    private sealed class GeneralSectionEditor : ISectionEditor
+    {
+        private static readonly string[] FieldLabels = ["language"];
+        private static readonly string[] SupportedLanguages = [GeneralConfig.English, GeneralConfig.ChineseSimplified];
+
+        private readonly Localizer _i18n;
+        private readonly Action _markDirty;
+        private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
+        private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
+        private readonly ComboBox _language = CreateCombo(SupportedLanguages);
+
+        public GeneralSectionEditor(Action markDirty, Localizer i18n)
+        {
+            _i18n = i18n;
+            _markDirty = markDirty;
+            _panel.Controls.Add(_grid);
+
+            AddRow(_grid, 0, T("language", "语言"), _language);
+            _language.SelectedIndexChanged += (_, _) => _markDirty();
+        }
+
+        public Control RootControl => _panel;
+
+        public void Load(JsonNode? sectionNode)
+        {
+            var defaults = new GeneralConfig();
+            var obj = sectionNode as JsonObject;
+            var value = obj is null
+                ? defaults.Language
+                : ReadString(obj, "language", defaults.Language);
+
+            var normalized = GeneralConfig.NormalizeLanguage(value) ?? defaults.Language;
+            SetComboValue(_language, normalized);
+        }
+
+        public JsonNode BuildNode()
+        {
+            var selected = _language.SelectedItem?.ToString() ?? GeneralConfig.English;
+            var normalized = GeneralConfig.NormalizeLanguage(selected) ?? GeneralConfig.English;
+            return new JsonObject
+            {
+                ["language"] = normalized
+            };
+        }
+
+        private static void SetComboValue(ComboBox combo, string value)
+        {
+            if (combo.Items.IndexOf(value) < 0)
+            {
+                combo.Items.Add(value);
+            }
+
+            combo.SelectedItem = value;
+        }
+
+        private string T(string english, string chineseSimplified)
+        {
+            return _i18n.Text(english, chineseSimplified);
+        }
+    }
+
     private sealed class ProxySectionEditor : ISectionEditor
     {
         private static readonly string[] FieldLabels = ["scheme", "host", "port"];
 
+        private readonly Localizer _i18n;
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
@@ -895,14 +1047,15 @@ internal sealed class ConfigEditorForm : Form
             DecimalPlaces = 0
         };
 
-        public ProxySectionEditor(Action markDirty)
+        public ProxySectionEditor(Action markDirty, Localizer i18n)
         {
+            _i18n = i18n;
             _markDirty = markDirty;
             _panel.Controls.Add(_grid);
 
-            AddRow(_grid, 0, "scheme", _scheme);
-            AddRow(_grid, 1, "host", _host);
-            AddRow(_grid, 2, "port", _port);
+            AddRow(_grid, 0, T("scheme", "协议"), _scheme);
+            AddRow(_grid, 1, T("host", "主机"), _host);
+            AddRow(_grid, 2, T("port", "端口"), _port);
 
             _scheme.SelectedIndexChanged += (_, _) => _markDirty();
             _host.TextChanged += (_, _) => _markDirty();
@@ -939,18 +1092,25 @@ internal sealed class ConfigEditorForm : Form
                 ["port"] = (int)_port.Value
             };
         }
+
+        private string T(string english, string chineseSimplified)
+        {
+            return _i18n.Text(english, chineseSimplified);
+        }
     }
 
     private sealed class Tun2SocksSectionEditor : ISectionEditor
     {
-        private static readonly string[] FieldLabels = ["executablePath", "argumentsTemplate"];
+        private static readonly string[] FieldLabels = ["executablePath", "wintunDllPath", "argumentsTemplate"];
 
+        private readonly Localizer _i18n;
         private readonly IWin32Window _owner;
         private readonly string _appConfigDirectory;
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
         private readonly TextBox _executablePath = new();
+        private readonly TextBox _wintunDllPath = new();
         private readonly TextBox _argumentsTemplate = new()
         {
             Multiline = true,
@@ -959,27 +1119,29 @@ internal sealed class ConfigEditorForm : Form
             Height = 100,
             Font = new Font("Consolas", 9.0f, FontStyle.Regular, GraphicsUnit.Point)
         };
-        private readonly Button _testButton = new() { Text = "Test", AutoSize = true };
+        private readonly Button _testButton = new() { AutoSize = true };
         private bool _isTesting;
 
-        public Tun2SocksSectionEditor(IWin32Window owner, string appConfigPath, Action markDirty)
+        public Tun2SocksSectionEditor(IWin32Window owner, string appConfigPath, Action markDirty, Localizer i18n)
         {
+            _i18n = i18n;
             _owner = owner;
             _appConfigDirectory = Path.GetDirectoryName(Path.GetFullPath(appConfigPath))
                 ?? Environment.CurrentDirectory;
             _markDirty = markDirty;
             _panel.Controls.Add(_grid);
+            _testButton.Text = T("Test", "测试");
 
             var browseButton = new Button
             {
-                Text = "Browse...",
+                Text = T("Browse...", "浏览..."),
                 AutoSize = true
             };
             browseButton.Click += (_, _) =>
             {
                 using var dialog = new OpenFileDialog
                 {
-                    Filter = "Executable files (*.exe)|*.exe|All files (*.*)|*.*",
+                    Filter = T("Executable files (*.exe)|*.exe|All files (*.*)|*.*", "可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*"),
                     CheckFileExists = true,
                     FileName = _executablePath.Text
                 };
@@ -991,16 +1153,50 @@ internal sealed class ConfigEditorForm : Form
 
             var downloadButton = new Button
             {
-                Text = "Download",
+                Text = T("Download", "下载"),
                 AutoSize = true
             };
             downloadButton.Click += (_, _) => OpenTun2SocksDownloadPage();
 
+            var wintunBrowseButton = new Button
+            {
+                Text = T("Browse...", "浏览..."),
+                AutoSize = true
+            };
+            wintunBrowseButton.Click += (_, _) =>
+            {
+                using var dialog = new OpenFileDialog
+                {
+                    Filter = T("DLL files (*.dll)|*.dll|All files (*.*)|*.*", "DLL 文件 (*.dll)|*.dll|所有文件 (*.*)|*.*"),
+                    CheckFileExists = true,
+                    FileName = _wintunDllPath.Text
+                };
+                if (dialog.ShowDialog(owner) == DialogResult.OK)
+                {
+                    _wintunDllPath.Text = dialog.FileName;
+                }
+            };
+
+            var wintunDownloadButton = new Button
+            {
+                Text = T("Download", "下载"),
+                AutoSize = true
+            };
+            wintunDownloadButton.Click += (_, _) => OpenWintunDownloadPage();
+
             _testButton.Click += async (_, _) => await TestExecutableAsync();
+            ApplyUniformActionButtonWidth(
+                browseButton,
+                _testButton,
+                downloadButton,
+                wintunBrowseButton,
+                wintunDownloadButton);
             AddExecutablePathRow(0, browseButton, downloadButton);
-            AddRow(_grid, 1, "argumentsTemplate", _argumentsTemplate);
+            AddWintunDllPathRow(1, wintunBrowseButton, wintunDownloadButton);
+            AddRow(_grid, 2, T("argumentsTemplate", "启动参数模板"), _argumentsTemplate);
 
             _executablePath.TextChanged += (_, _) => _markDirty();
+            _wintunDllPath.TextChanged += (_, _) => _markDirty();
             _argumentsTemplate.TextChanged += (_, _) => _markDirty();
         }
 
@@ -1014,6 +1210,9 @@ internal sealed class ConfigEditorForm : Form
             _executablePath.Text = obj is null
                 ? defaults.ExecutablePath
                 : ReadString(obj, "executablePath", defaults.ExecutablePath);
+            _wintunDllPath.Text = obj is null
+                ? defaults.WintunDllPath
+                : ReadString(obj, "wintunDllPath", defaults.WintunDllPath);
             _argumentsTemplate.Text = obj is null
                 ? defaults.ArgumentsTemplate
                 : ReadString(obj, "argumentsTemplate", defaults.ArgumentsTemplate);
@@ -1024,6 +1223,7 @@ internal sealed class ConfigEditorForm : Form
             return new JsonObject
             {
                 ["executablePath"] = _executablePath.Text.Trim(),
+                ["wintunDllPath"] = _wintunDllPath.Text.Trim(),
                 ["argumentsTemplate"] = _argumentsTemplate.Text
             };
         }
@@ -1032,7 +1232,7 @@ internal sealed class ConfigEditorForm : Form
         {
             var label = new Label
             {
-                Text = "executablePath",
+                Text = T("executablePath", "可执行文件路径"),
                 Font = LabelMonoFont,
                 AutoSize = true,
                 Anchor = AnchorStyles.Left,
@@ -1075,6 +1275,67 @@ internal sealed class ConfigEditorForm : Form
             _grid.SetColumnSpan(rowHost, 2);
         }
 
+        private void ApplyUniformActionButtonWidth(params Button[] buttons)
+        {
+            if (buttons.Length == 0)
+            {
+                return;
+            }
+
+            var testingWidth = TextRenderer.MeasureText(T("Testing...", "测试中..."), _testButton.Font).Width + 12;
+            var width = buttons
+                .Select(button => Math.Max(button.PreferredSize.Width, testingWidth))
+                .Max();
+
+            foreach (var button in buttons)
+            {
+                button.MinimumSize = new Size(width, 0);
+            }
+        }
+
+        private void AddWintunDllPathRow(int row, Button browseButton, Button downloadButton)
+        {
+            var label = new Label
+            {
+                Text = T("wintunDllPath", "Wintun DLL 路径"),
+                Font = LabelMonoFont,
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 4, 4, 0)
+            };
+
+            var rowHost = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 3,
+                RowCount = 1,
+                AutoSize = true,
+                Margin = new Padding(0, 4, 0, 0)
+            };
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            _wintunDllPath.Dock = DockStyle.None;
+            _wintunDllPath.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            _wintunDllPath.Margin = new Padding(0);
+            _wintunDllPath.MinimumSize = new Size(120, 26);
+            _wintunDllPath.Font = _panel.Font;
+
+            browseButton.Margin = new Padding(8, 0, 0, 0);
+            browseButton.Anchor = AnchorStyles.Left;
+            downloadButton.Margin = new Padding(8, 0, 0, 0);
+            downloadButton.Anchor = AnchorStyles.Left;
+
+            rowHost.Controls.Add(_wintunDllPath, 0, 0);
+            rowHost.Controls.Add(browseButton, 1, 0);
+            rowHost.Controls.Add(downloadButton, 2, 0);
+
+            _grid.Controls.Add(label, 0, row);
+            _grid.Controls.Add(rowHost, 1, row);
+            _grid.SetColumnSpan(rowHost, 2);
+        }
+
         private void OpenTun2SocksDownloadPage()
         {
             try
@@ -1089,8 +1350,29 @@ internal sealed class ConfigEditorForm : Form
             {
                 MessageBox.Show(
                     _owner,
-                    $"Failed to open download page: {ex.Message}",
-                    "EpTUN Config Editor",
+                    T($"Failed to open download page: {ex.Message}", $"打开下载页面失败：{ex.Message}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private void OpenWintunDownloadPage()
+        {
+            try
+            {
+                _ = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "https://www.wintun.net/",
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    _owner,
+                    T($"Failed to open download page: {ex.Message}", $"打开下载页面失败：{ex.Message}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -1108,8 +1390,8 @@ internal sealed class ConfigEditorForm : Form
             {
                 MessageBox.Show(
                     _owner,
-                    "Please set tun2socks.executablePath first.",
-                    "EpTUN Config Editor",
+                    T("Please set tun2socks.executablePath first.", "请先设置 tun2socks.executablePath。"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
                 return;
@@ -1119,9 +1401,10 @@ internal sealed class ConfigEditorForm : Form
             {
                 MessageBox.Show(
                     _owner,
-                    $"Executable not found:{Environment.NewLine}{exePath}{Environment.NewLine}" +
-                    $"(configured value: {_executablePath.Text.Trim()})",
-                    "EpTUN Config Editor",
+                    T(
+                        $"Executable not found:{Environment.NewLine}{exePath}{Environment.NewLine}(configured value: {_executablePath.Text.Trim()})",
+                        $"未找到可执行文件：{Environment.NewLine}{exePath}{Environment.NewLine}(配置值：{_executablePath.Text.Trim()})"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return;
@@ -1130,7 +1413,7 @@ internal sealed class ConfigEditorForm : Form
             _isTesting = true;
             _testButton.Enabled = false;
             var originalText = _testButton.Text;
-            _testButton.Text = "Testing...";
+            _testButton.Text = T("Testing...", "测试中...");
 
             try
             {
@@ -1151,8 +1434,8 @@ internal sealed class ConfigEditorForm : Form
                 {
                     MessageBox.Show(
                         _owner,
-                        "Executable started but did not return any version/help output.",
-                        "EpTUN Config Editor",
+                        T("Executable started but did not return any version/help output.", "可执行文件已启动，但未返回版本/帮助输出。"),
+                        T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
                     return;
@@ -1163,8 +1446,10 @@ internal sealed class ConfigEditorForm : Form
                     : successful.Output;
                 MessageBox.Show(
                     _owner,
-                    $"Test succeeded with `{successful.ProbeArguments}`.{Environment.NewLine}{Environment.NewLine}{preview}",
-                    "EpTUN Config Editor",
+                    T(
+                        $"Test succeeded with `{successful.ProbeArguments}`.{Environment.NewLine}{Environment.NewLine}{preview}",
+                        $"测试成功（参数 `{successful.ProbeArguments}`）。{Environment.NewLine}{Environment.NewLine}{preview}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
             }
@@ -1172,8 +1457,8 @@ internal sealed class ConfigEditorForm : Form
             {
                 MessageBox.Show(
                     _owner,
-                    $"Executable test failed: {ex.Message}",
-                    "EpTUN Config Editor",
+                    T($"Executable test failed: {ex.Message}", $"可执行文件测试失败：{ex.Message}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -1185,7 +1470,7 @@ internal sealed class ConfigEditorForm : Form
             }
         }
 
-        private static async Task<ProcessProbeResult> RunProbeAsync(string executablePath, string arguments, int timeoutMs)
+        private async Task<ProcessProbeResult> RunProbeAsync(string executablePath, string arguments, int timeoutMs)
         {
             using var process = new Process
             {
@@ -1202,7 +1487,7 @@ internal sealed class ConfigEditorForm : Form
 
             if (!process.Start())
             {
-                throw new InvalidOperationException("Failed to start executable.");
+                throw new InvalidOperationException(T("Failed to start executable.", "启动可执行文件失败。"));
             }
 
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
@@ -1224,7 +1509,7 @@ internal sealed class ConfigEditorForm : Form
                     // Ignore kill failures on timeout cleanup.
                 }
 
-                throw new TimeoutException($"Probe `{arguments}` timed out after {timeoutMs}ms.");
+                throw new TimeoutException(T($"Probe `{arguments}` timed out after {timeoutMs}ms.", $"探测 `{arguments}` 超时（{timeoutMs}ms）。"));
             }
 
             var stdout = await stdoutTask;
@@ -1260,6 +1545,11 @@ internal sealed class ConfigEditorForm : Form
         }
 
         private sealed record ProcessProbeResult(string ProbeArguments, int ExitCode, string Output);
+
+        private string T(string english, string chineseSimplified)
+        {
+            return _i18n.Text(english, chineseSimplified);
+        }
     }
 
     private sealed class VpnSectionEditor : ISectionEditor
@@ -1281,6 +1571,7 @@ internal sealed class ConfigEditorForm : Form
             "addBypassRouteForProxyHost"
         ];
 
+        private readonly Localizer _i18n;
         private readonly IWin32Window _owner;
         private readonly string _appConfigDirectory;
         private readonly Action _markDirty;
@@ -1301,8 +1592,9 @@ internal sealed class ConfigEditorForm : Form
         private readonly TextBox _defaultGatewayOverride = new();
         private readonly CheckBox _addBypassRouteForProxyHost = new() { AutoSize = true };
 
-        public VpnSectionEditor(IWin32Window owner, string appConfigPath, Action markDirty)
+        public VpnSectionEditor(IWin32Window owner, string appConfigPath, Action markDirty, Localizer i18n)
         {
+            _i18n = i18n;
             _owner = owner;
             _appConfigDirectory = Path.GetDirectoryName(Path.GetFullPath(appConfigPath))
                 ?? Environment.CurrentDirectory;
@@ -1311,15 +1603,15 @@ internal sealed class ConfigEditorForm : Form
             _grid.Controls.Clear();
             _panel.Controls.Add(_grid);
 
-            AddRow(_grid, 0, "interfaceName", _interfaceName);
-            AddRow(_grid, 1, "tunAddress", _tunAddress);
-            AddRow(_grid, 2, "tunGateway", _tunGateway);
-            AddRow(_grid, 3, "tunMask", _tunMask);
-            AddRow(_grid, 4, "dnsServers (one per line)", _dnsServers);
-            AddRow(_grid, 5, "includeCidrs (one per line)", _includeCidrs);
+            AddRow(_grid, 0, T("interfaceName", "接口名"), _interfaceName);
+            AddRow(_grid, 1, T("tunAddress", "TUN 地址"), _tunAddress);
+            AddRow(_grid, 2, T("tunGateway", "TUN 网关"), _tunGateway);
+            AddRow(_grid, 3, T("tunMask", "TUN 子网掩码"), _tunMask);
+            AddRow(_grid, 4, T("dnsServers (one per line)", "DNS 服务器（每行一条）"), _dnsServers);
+            AddRow(_grid, 5, T("includeCidrs (one per line)", "包含 CIDR（每行一条）"), _includeCidrs);
             var importV2RayButton = new Button
             {
-                Text = "import v2ray config",
+                Text = T("import v2ray config", "导入 v2ray 配置"),
                 AutoSize = true
             };
             importV2RayButton.Click += (_, _) => ImportV2RayOutbounds();
@@ -1327,14 +1619,14 @@ internal sealed class ConfigEditorForm : Form
 
             var browseButton = new Button
             {
-                Text = "Browse...",
+                Text = T("Browse...", "浏览..."),
                 AutoSize = true
             };
             browseButton.Click += (_, _) =>
             {
                 using var dialog = new OpenFileDialog
                 {
-                    Filter = "DAT files (*.dat)|*.dat|All files (*.*)|*.*",
+                    Filter = T("DAT files (*.dat)|*.dat|All files (*.*)|*.*", "DAT 文件 (*.dat)|*.dat|所有文件 (*.*)|*.*"),
                     CheckFileExists = true,
                     FileName = _cnDatPath.Text
                 };
@@ -1346,28 +1638,17 @@ internal sealed class ConfigEditorForm : Form
 
             var downloadButton = new Button
             {
-                Text = "Download",
+                Text = T("Download", "下载"),
                 AutoSize = true
             };
             downloadButton.Click += (_, _) => OpenCnDatDownloadPage();
 
-            var cnDatActionHost = new FlowLayoutPanel
-            {
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                WrapContents = false,
-                FlowDirection = FlowDirection.LeftToRight,
-                Margin = new Padding(0)
-            };
-            cnDatActionHost.Controls.Add(browseButton);
-            cnDatActionHost.Controls.Add(downloadButton);
-
-            AddRow(_grid, 7, "cnDatPath", _cnDatPath, cnDatActionHost);
-            AddRow(_grid, 8, "bypassCn", _bypassCn);
-            AddRow(_grid, 9, "routeMetric", _routeMetric);
-            AddRow(_grid, 10, "startupDelayMs", _startupDelayMs);
-            AddRow(_grid, 11, "defaultGatewayOverride", _defaultGatewayOverride);
-            AddRow(_grid, 12, "addBypassRouteForProxyHost", _addBypassRouteForProxyHost);
+            AddCnDatPathRow(7, browseButton, downloadButton);
+            AddRow(_grid, 8, T("bypassCn", "绕过 CN"), _bypassCn);
+            AddRow(_grid, 9, T("routeMetric", "路由跃点"), _routeMetric);
+            AddRow(_grid, 10, T("startupDelayMs", "启动延迟（毫秒）"), _startupDelayMs);
+            AddRow(_grid, 11, T("defaultGatewayOverride", "默认网关覆盖"), _defaultGatewayOverride);
+            AddRow(_grid, 12, T("addBypassRouteForProxyHost", "为代理主机添加绕过路由"), _addBypassRouteForProxyHost);
 
             WireDirty(_interfaceName);
             WireDirty(_tunAddress);
@@ -1464,7 +1745,7 @@ internal sealed class ConfigEditorForm : Form
         {
             var label = new Label
             {
-                Text = "excludeCidrs (one per line)",
+                Text = T("excludeCidrs (one per line)", "排除 CIDR（每行一条）"),
                 Font = LabelMonoFont,
                 AutoSize = true,
                 Margin = new Padding(0, 0, 0, 0)
@@ -1492,6 +1773,49 @@ internal sealed class ConfigEditorForm : Form
             _grid.SetColumnSpan(_excludeCidrs, 2);
         }
 
+        private void AddCnDatPathRow(int row, Button browseButton, Button downloadButton)
+        {
+            var label = new Label
+            {
+                Text = T("cnDatPath", "cn.dat 路径"),
+                Font = LabelMonoFont,
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 8, 4, 0)
+            };
+
+            var rowHost = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 3,
+                RowCount = 1,
+                AutoSize = true,
+                Margin = new Padding(0, 4, 0, 0)
+            };
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            _cnDatPath.Dock = DockStyle.None;
+            _cnDatPath.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            _cnDatPath.Margin = new Padding(0);
+            _cnDatPath.MinimumSize = new Size(120, 26);
+            _cnDatPath.Font = _panel.Font;
+
+            browseButton.Margin = new Padding(8, 0, 0, 0);
+            browseButton.Anchor = AnchorStyles.Left;
+            downloadButton.Margin = new Padding(8, 0, 0, 0);
+            downloadButton.Anchor = AnchorStyles.Left;
+
+            rowHost.Controls.Add(_cnDatPath, 0, 0);
+            rowHost.Controls.Add(browseButton, 1, 0);
+            rowHost.Controls.Add(downloadButton, 2, 0);
+
+            _grid.Controls.Add(label, 0, row);
+            _grid.Controls.Add(rowHost, 1, row);
+            _grid.SetColumnSpan(rowHost, 2);
+        }
+
         private void ImportV2RayOutbounds()
         {
             var defaultPath = Path.Combine(_appConfigDirectory, "config.json");
@@ -1502,7 +1826,7 @@ internal sealed class ConfigEditorForm : Form
 
             using var dialog = new OpenFileDialog
             {
-                Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+                Filter = T("JSON files (*.json)|*.json|All files (*.*)|*.*", "JSON 文件 (*.json)|*.json|所有文件 (*.*)|*.*"),
                 CheckFileExists = true,
                 FileName = defaultPath
             };
@@ -1543,10 +1867,14 @@ internal sealed class ConfigEditorForm : Form
 
                 MessageBox.Show(
                     _owner,
-                    $"Imported {added} new CIDR routes from outbounds.{Environment.NewLine}" +
-                    $"Address candidates: {parsed.AddressCandidateCount}, non-IP skipped: {parsed.SkippedAddressCount}.{Environment.NewLine}" +
-                    $"Domain candidates: {parsed.DomainCandidateCount}, resolved: {parsed.ResolvedDomainCount}, failed: {parsed.FailedDomainCount}.",
-                    "EpTUN Config Editor",
+                    T(
+                        $"Imported {added} new CIDR routes from outbounds.{Environment.NewLine}" +
+                        $"Address candidates: {parsed.AddressCandidateCount}, non-IP skipped: {parsed.SkippedAddressCount}.{Environment.NewLine}" +
+                        $"Domain candidates: {parsed.DomainCandidateCount}, resolved: {parsed.ResolvedDomainCount}, failed: {parsed.FailedDomainCount}.",
+                        $"已从 outbounds 导入 {added} 条 CIDR 路由。{Environment.NewLine}" +
+                        $"地址候选：{parsed.AddressCandidateCount}，跳过的非 IP：{parsed.SkippedAddressCount}。{Environment.NewLine}" +
+                        $"域名候选：{parsed.DomainCandidateCount}，解析成功：{parsed.ResolvedDomainCount}，失败：{parsed.FailedDomainCount}。"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
             }
@@ -1554,8 +1882,8 @@ internal sealed class ConfigEditorForm : Form
             {
                 MessageBox.Show(
                     _owner,
-                    $"Failed to import v2ray-core outbounds: {ex.Message}",
-                    "EpTUN Config Editor",
+                    T($"Failed to import v2ray-core outbounds: {ex.Message}", $"导入 v2ray-core outbounds 失败：{ex.Message}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -1575,11 +1903,16 @@ internal sealed class ConfigEditorForm : Form
             {
                 MessageBox.Show(
                     _owner,
-                    $"Failed to open download page: {ex.Message}",
-                    "EpTUN Config Editor",
+                    T($"Failed to open download page: {ex.Message}", $"打开下载页面失败：{ex.Message}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
+        }
+
+        private string T(string english, string chineseSimplified)
+        {
+            return _i18n.Text(english, chineseSimplified);
         }
     }
 
@@ -1601,6 +1934,7 @@ internal sealed class ConfigEditorForm : Form
             "connectionTest"
         ];
 
+        private readonly Localizer _i18n;
         private readonly IWin32Window _owner;
         private readonly Action _markDirty;
         private readonly Func<V2RayAConfig, Task<(Uri ProxyUri, int ConnectedServerCount)>> _testConnectionAsync;
@@ -1624,18 +1958,21 @@ internal sealed class ConfigEditorForm : Form
         private readonly CheckBox _autoDetectProxyPort = new() { AutoSize = true };
         private readonly CheckBox _preferPacPort = new() { AutoSize = true };
         private readonly TextBox _proxyHostOverride = new();
-        private readonly Button _testButton = new() { Text = "Test", AutoSize = true };
+        private readonly Button _testButton = new() { AutoSize = true };
         private readonly Control[] _dependentControls;
         private bool _isTesting;
 
         public V2RayASectionEditor(
             IWin32Window owner,
             Action markDirty,
+            Localizer i18n,
             Func<V2RayAConfig, Task<(Uri ProxyUri, int ConnectedServerCount)>> testConnectionAsync)
         {
+            _i18n = i18n;
             _owner = owner;
             _markDirty = markDirty;
             _testConnectionAsync = testConnectionAsync;
+            _testButton.Text = T("Test", "测试");
             _dependentControls =
             [
                 _baseUrl,
@@ -1653,17 +1990,17 @@ internal sealed class ConfigEditorForm : Form
 
             _panel.Controls.Add(_grid);
 
-            AddRow(_grid, 0, "enabled", _enabled);
-            AddRow(_grid, 1, "baseUrl", _baseUrl);
-            AddRow(_grid, 2, "authorization", _authorization);
-            AddRow(_grid, 3, "username", _username);
-            AddRow(_grid, 4, "password", _password);
-            AddRow(_grid, 5, "requestId", _requestId);
-            AddRow(_grid, 6, "timeoutMs", _timeoutMs);
-            AddRow(_grid, 7, "resolveHostnames", _resolveHostnames);
-            AddRow(_grid, 8, "autoDetectProxyPort", _autoDetectProxyPort);
-            AddRow(_grid, 9, "preferPacPort", _preferPacPort);
-            AddRow(_grid, 10, "proxyHostOverride", _proxyHostOverride);
+            AddRow(_grid, 0, T("enabled", "启用"), _enabled);
+            AddRow(_grid, 1, T("baseUrl", "基础地址"), _baseUrl);
+            AddRow(_grid, 2, T("authorization", "授权令牌"), _authorization);
+            AddRow(_grid, 3, T("username", "用户名"), _username);
+            AddRow(_grid, 4, T("password", "密码"), _password);
+            AddRow(_grid, 5, T("requestId", "请求 ID"), _requestId);
+            AddRow(_grid, 6, T("timeoutMs", "超时（毫秒）"), _timeoutMs);
+            AddRow(_grid, 7, T("resolveHostnames", "解析主机名"), _resolveHostnames);
+            AddRow(_grid, 8, T("autoDetectProxyPort", "自动检测代理端口"), _autoDetectProxyPort);
+            AddRow(_grid, 9, T("preferPacPort", "优先 PAC 端口"), _preferPacPort);
+            AddRow(_grid, 10, T("proxyHostOverride", "代理主机覆盖"), _proxyHostOverride);
 
             var testHost = new FlowLayoutPanel
             {
@@ -1673,7 +2010,7 @@ internal sealed class ConfigEditorForm : Form
                 Margin = new Padding(0)
             };
             testHost.Controls.Add(_testButton);
-            AddRow(_grid, 11, "connectionTest", testHost);
+            AddRow(_grid, 11, T("connectionTest", "连接测试"), testHost);
 
             _enabled.CheckedChanged += (_, _) =>
             {
@@ -1767,15 +2104,15 @@ internal sealed class ConfigEditorForm : Form
                 config = JsonSerializer.Deserialize<V2RayAConfig>(
                         BuildNode().ToJsonString(),
                         AppConfig.SerializerOptions)
-                    ?? throw new InvalidOperationException("Failed to parse v2rayA configuration.");
+                    ?? throw new InvalidOperationException(T("Failed to parse v2rayA configuration.", "解析 v2rayA 配置失败。"));
                 config.Validate();
             }
             catch (Exception ex)
             {
                 MessageBox.Show(
                     _owner,
-                    $"v2rayA test failed: {ex.Message}",
-                    "EpTUN Config Editor",
+                    T($"v2rayA test failed: {ex.Message}", $"v2rayA 测试失败：{ex.Message}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return;
@@ -1791,10 +2128,14 @@ internal sealed class ConfigEditorForm : Form
                 var result = await _testConnectionAsync(config);
                 MessageBox.Show(
                     _owner,
-                    $"v2rayA test succeeded.{Environment.NewLine}" +
-                    $"Proxy endpoint: {result.ProxyUri}{Environment.NewLine}" +
-                    $"Connected servers: {result.ConnectedServerCount}",
-                    "EpTUN Config Editor",
+                    T(
+                        $"v2rayA test succeeded.{Environment.NewLine}" +
+                        $"Proxy endpoint: {result.ProxyUri}{Environment.NewLine}" +
+                        $"Connected servers: {result.ConnectedServerCount}",
+                        $"v2rayA 测试成功。{Environment.NewLine}" +
+                        $"代理端点：{result.ProxyUri}{Environment.NewLine}" +
+                        $"已连接服务器数：{result.ConnectedServerCount}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
             }
@@ -1802,8 +2143,8 @@ internal sealed class ConfigEditorForm : Form
             {
                 MessageBox.Show(
                     _owner,
-                    $"v2rayA test failed: {ex.Message}",
-                    "EpTUN Config Editor",
+                    T($"v2rayA test failed: {ex.Message}", $"v2rayA 测试失败：{ex.Message}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -1829,12 +2170,18 @@ internal sealed class ConfigEditorForm : Form
         {
             textBox.TextChanged += (_, _) => _markDirty();
         }
+
+        private string T(string english, string chineseSimplified)
+        {
+            return _i18n.Text(english, chineseSimplified);
+        }
     }
 
     private sealed class LoggingSectionEditor : ISectionEditor
     {
         private static readonly string[] FieldLabels = ["windowLevel", "fileLevel", "trafficSampleMilliseconds"];
 
+        private readonly Localizer _i18n;
         private readonly Action _markDirty;
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
@@ -1847,14 +2194,15 @@ internal sealed class ConfigEditorForm : Form
             DecimalPlaces = 0
         };
 
-        public LoggingSectionEditor(Action markDirty)
+        public LoggingSectionEditor(Action markDirty, Localizer i18n)
         {
+            _i18n = i18n;
             _markDirty = markDirty;
             _panel.Controls.Add(_grid);
 
-            AddRow(_grid, 0, "windowLevel", _windowLevel);
-            AddRow(_grid, 1, "fileLevel", _fileLevel);
-            AddRow(_grid, 2, "trafficSampleMilliseconds", _trafficSampleMilliseconds);
+            AddRow(_grid, 0, T("windowLevel", "窗口日志级别"), _windowLevel);
+            AddRow(_grid, 1, T("fileLevel", "文件日志级别"), _fileLevel);
+            AddRow(_grid, 2, T("trafficSampleMilliseconds", "流量采样间隔（毫秒）"), _trafficSampleMilliseconds);
 
             _windowLevel.SelectedIndexChanged += (_, _) => _markDirty();
             _fileLevel.SelectedIndexChanged += (_, _) => _markDirty();
@@ -1910,6 +2258,11 @@ internal sealed class ConfigEditorForm : Form
             }
 
             combo.SelectedItem = value;
+        }
+
+        private string T(string english, string chineseSimplified)
+        {
+            return _i18n.Text(english, chineseSimplified);
         }
     }
 }

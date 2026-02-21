@@ -7,6 +7,9 @@ namespace EpTUN;
 
 public sealed class AppConfig
 {
+    [JsonPropertyName("general")]
+    public GeneralConfig General { get; init; } = new();
+
     [JsonPropertyName("proxy")]
     public ProxyConfig Proxy { get; init; } = new();
 
@@ -32,11 +35,50 @@ public sealed class AppConfig
 
     public void Validate()
     {
+        General.Validate();
         Proxy.Validate();
         Tun2Socks.Validate();
         Vpn.Validate();
         V2RayA.Validate();
         Logging.Validate();
+    }
+}
+
+public sealed class GeneralConfig
+{
+    public const string English = "en";
+    public const string ChineseSimplified = "zh-CN";
+
+    [JsonPropertyName("language")]
+    public string Language { get; init; } = English;
+
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(Language))
+        {
+            throw new ArgumentException("general.language must be 'en' or 'zh-CN'.");
+        }
+
+        var normalized = NormalizeLanguage(Language);
+        if (normalized is null)
+        {
+            throw new ArgumentException("general.language must be 'en' or 'zh-CN'.");
+        }
+    }
+
+    public static string? NormalizeLanguage(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "en" => English,
+            "zh-cn" => ChineseSimplified,
+            _ => null
+        };
     }
 }
 
@@ -171,6 +213,9 @@ public sealed class Tun2SocksConfig
     [JsonPropertyName("executablePath")]
     public string ExecutablePath { get; init; } = @".\bin\tun2socks.exe";
 
+    [JsonPropertyName("wintunDllPath")]
+    public string WintunDllPath { get; init; } = "wintun.dll";
+
     [JsonPropertyName("argumentsTemplate")]
     public string ArgumentsTemplate { get; init; } =
         "-device {interfaceName} -proxy {proxyUri} -loglevel info";
@@ -185,6 +230,11 @@ public sealed class Tun2SocksConfig
         if (string.IsNullOrWhiteSpace(ArgumentsTemplate))
         {
             throw new ArgumentException("tun2Socks.argumentsTemplate is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(WintunDllPath))
+        {
+            throw new ArgumentException("tun2Socks.wintunDllPath is required.");
         }
     }
 }
