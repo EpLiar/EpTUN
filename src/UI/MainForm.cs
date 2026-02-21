@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Globalization;
 using System.Net.NetworkInformation;
 using System.Security.Principal;
 using System.Text.Json;
@@ -779,18 +780,20 @@ internal sealed class MainForm : Form
 
     private static string FormatRate(double bytesPerSecond)
     {
-        return $"{FormatByteSize(bytesPerSecond)}/s";
+        return $"{FormatTrafficValue(bytesPerSecond)}/s";
     }
 
     private static string FormatBytes(ulong bytes)
     {
-        return FormatByteSize(bytes);
+        return FormatTrafficValue(bytes);
     }
 
-    private static string FormatByteSize(double bytes)
+    private static string FormatTrafficValue(double bytes)
     {
-        var value = Math.Max(0, bytes);
-        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        // Use fixed-width placeholder: "xxx.xx XX" (rate appends "/s"),
+        // so traffic text width is stable across refreshes.
+        var value = Math.Max(0, bytes) / 1024.0;
+        string[] units = ["KB", "MB", "GB", "TB", "PB", "EB"];
         var unit = 0;
 
         while (value >= 1024 && unit < units.Length - 1)
@@ -799,8 +802,21 @@ internal sealed class MainForm : Form
             unit++;
         }
 
-        var decimals = unit == 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
-        return $"{value.ToString($"F{decimals}")} {units[unit]}";
+        var rounded = Math.Round(value, 2, MidpointRounding.AwayFromZero);
+        if (rounded >= 1000 && unit < units.Length - 1)
+        {
+            value = rounded / 1024.0;
+            unit++;
+            rounded = Math.Round(value, 2, MidpointRounding.AwayFromZero);
+        }
+
+        if (rounded > 999.99)
+        {
+            rounded = 999.99;
+        }
+
+        var numericText = rounded.ToString("0.00", CultureInfo.InvariantCulture).PadLeft(6, ' ');
+        return $"{numericText} {units[unit]}";
     }
 
     private static async Task<AppConfig> LoadConfigAsync(string configPath)
