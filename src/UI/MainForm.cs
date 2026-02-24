@@ -53,7 +53,7 @@ internal sealed class MainForm : Form
         _i18n = new Localizer(UiLanguageResolver.ResolveFromConfigPath(configPath));
         _baseStatusText = T("Status: idle", "状态：空闲");
 
-        _appIcon = IconLoader.LoadFromPngCandidates();
+        _appIcon = IconLoader.LoadFromExecutable();
         Icon = _appIcon;
 
         (_windowLogLevel, _fileLogLevel, _logLevelLoadWarnings) = ResolveLogLevelSettings(configPath);

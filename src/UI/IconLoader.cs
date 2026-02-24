@@ -1,52 +1,34 @@
-﻿using System.Drawing;
-using System.Runtime.InteropServices;
+using System.Drawing;
+using System.Windows.Forms;
 
 namespace EpTUN;
 
 internal static class IconLoader
 {
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool DestroyIcon(IntPtr hIcon);
-
-    public static Icon LoadFromPngCandidates()
+    public static Icon LoadFromExecutable()
     {
-        foreach (var path in GetCandidatePaths())
+        try
         {
-            if (!File.Exists(path))
+            var executablePath = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(executablePath))
             {
-                continue;
+                executablePath = Application.ExecutablePath;
             }
 
-            try
+            if (!string.IsNullOrWhiteSpace(executablePath))
             {
-                using var bitmap = new Bitmap(path);
-                var iconHandle = bitmap.GetHicon();
-
-                try
+                using var icon = Icon.ExtractAssociatedIcon(executablePath);
+                if (icon is not null)
                 {
-                    using var handleIcon = Icon.FromHandle(iconHandle);
-                    return (Icon)handleIcon.Clone();
-                }
-                finally
-                {
-                    _ = DestroyIcon(iconHandle);
+                    return (Icon)icon.Clone();
                 }
             }
-            catch
-            {
-                // ignore broken icon files and keep searching
-            }
+        }
+        catch
+        {
+            // Fallback to default icon when extraction is unavailable.
         }
 
         return (Icon)SystemIcons.Application.Clone();
     }
-
-    private static IEnumerable<string> GetCandidatePaths()
-    {
-        yield return Path.Combine(AppContext.BaseDirectory, "favicon.png");
-        yield return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "favicon.png"));
-        yield return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "favicon.png"));
-        yield return Path.Combine(Environment.CurrentDirectory, "favicon.png");
-    }
 }
-
