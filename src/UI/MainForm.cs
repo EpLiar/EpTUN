@@ -44,6 +44,7 @@ internal sealed class MainForm : Form
     private bool _isRunning;
     private bool _exitRequested;
     private bool _trayHintShown;
+    private int _pendingExternalShowRequest;
     private string _baseStatusText = string.Empty;
     private string _trafficStatusText = string.Empty;
 
@@ -295,6 +296,7 @@ internal sealed class MainForm : Form
         _trayStopItem.Click += (_, _) => StopVpn();
         _trayExitItem.Click += async (_, _) => await ExitApplicationAsync();
         _notifyIcon.DoubleClick += (_, _) => ShowWindow();
+        HandleCreated += (_, _) => FlushPendingExternalShowRequest();
 
         FormClosing += OnFormClosing;
     }
@@ -980,6 +982,46 @@ internal sealed class MainForm : Form
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
+    }
+
+    internal void RequestShowWindowFromExternalInstance()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (!IsHandleCreated)
+        {
+            Interlocked.Exchange(ref _pendingExternalShowRequest, 1);
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(new Action(ShowWindow));
+            }
+            catch (InvalidOperationException)
+            {
+                Interlocked.Exchange(ref _pendingExternalShowRequest, 1);
+            }
+
+            return;
+        }
+
+        ShowWindow();
+    }
+
+    private void FlushPendingExternalShowRequest()
+    {
+        if (Interlocked.Exchange(ref _pendingExternalShowRequest, 0) == 0)
+        {
+            return;
+        }
+
+        ShowWindow();
     }
 
     private void ApplyLogWrapSetting(bool enabled)
