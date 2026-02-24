@@ -60,7 +60,7 @@ internal static class Program
 
         using var activationListenerCts = new CancellationTokenSource();
         var mainForm = new MainForm(configPath);
-        var activationListenerTask = RunActivationListenerAsync(
+        _ = RunActivationListenerAsync(
             activationPipeName,
             () => mainForm.RequestShowWindowFromExternalInstance(),
             activationListenerCts.Token);
@@ -68,14 +68,6 @@ internal static class Program
         Application.Run(mainForm);
 
         activationListenerCts.Cancel();
-        try
-        {
-            activationListenerTask.GetAwaiter().GetResult();
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected during app shutdown.
-        }
     }
 
     private static string ResolveConfigPath(IReadOnlyList<string> args)
