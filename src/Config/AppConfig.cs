@@ -52,6 +52,9 @@ public sealed class GeneralConfig
     [JsonPropertyName("language")]
     public string Language { get; init; } = English;
 
+    [JsonPropertyName("autoStart")]
+    public bool AutoStart { get; init; }
+
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(Language))

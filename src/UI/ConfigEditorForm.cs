@@ -33,6 +33,7 @@ internal sealed class ConfigEditorForm : Form
         ("Save", "保存"),
         ("Close", "关闭"),
         ("language", "语言"),
+        ("autoStart", "开机自启动"),
         ("scheme", "协议"),
         ("host", "主机"),
         ("port", "端口"),
@@ -406,11 +407,44 @@ internal sealed class ConfigEditorForm : Form
             var selectedTabKey = _tabControl.SelectedTab?.Tag as string;
             var selectedTabIndex = _tabControl.SelectedIndex;
             var nextLanguage = UiLanguageResolver.Resolve(config);
+            var previousAutoStartEnabled = WindowsAutoStartManager.IsEnabled();
+            var desiredAutoStartEnabled = config.General.AutoStart;
+            var autoStartUpdated = false;
 
-            File.WriteAllText(
-                _configPath,
-                serialized + Environment.NewLine,
-                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            try
+            {
+                if (desiredAutoStartEnabled)
+                {
+                    WindowsAutoStartManager.SetEnabled(_configPath, enabled: true);
+                    autoStartUpdated = true;
+                }
+                else if (previousAutoStartEnabled)
+                {
+                    WindowsAutoStartManager.SetEnabled(_configPath, enabled: false);
+                    autoStartUpdated = true;
+                }
+
+                File.WriteAllText(
+                    _configPath,
+                    serialized + Environment.NewLine,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            }
+            catch
+            {
+                if (autoStartUpdated)
+                {
+                    try
+                    {
+                        WindowsAutoStartManager.SetEnabled(_configPath, previousAutoStartEnabled);
+                    }
+                    catch
+                    {
+                        // Preserve the original exception.
+                    }
+                }
+
+                throw;
+            }
 
             var normalizedRoot = JsonNode.Parse(serialized) as JsonObject;
             if (normalizedRoot is not null)
@@ -1193,7 +1227,7 @@ internal sealed class ConfigEditorForm : Form
 
     private sealed class GeneralSectionEditor : ISectionEditor
     {
-        private static readonly string[] FieldLabels = ["language"];
+        private static readonly string[] FieldLabels = ["language", "autoStart"];
         private static readonly string[] SupportedLanguages = [GeneralConfig.English, GeneralConfig.ChineseSimplified];
 
         private Localizer _i18n;
@@ -1201,6 +1235,7 @@ internal sealed class ConfigEditorForm : Form
         private readonly Panel _panel = new() { Dock = DockStyle.Fill, AutoScroll = true };
         private readonly TableLayoutPanel _grid = CreateGrid(FieldLabels);
         private readonly ComboBox _language = CreateCombo(SupportedLanguages);
+        private readonly CheckBox _autoStart = new() { AutoSize = true };
 
         public GeneralSectionEditor(Action markDirty, Localizer i18n)
         {
@@ -1209,7 +1244,9 @@ internal sealed class ConfigEditorForm : Form
             _panel.Controls.Add(_grid);
 
             AddRow(_grid, 0, T("language", "语言"), _language);
+            AddRow(_grid, 1, T("autoStart", "开机自启动"), _autoStart);
             _language.SelectedIndexChanged += (_, _) => _markDirty();
+            _autoStart.CheckedChanged += (_, _) => _markDirty();
         }
 
         public Control RootControl => _panel;
@@ -1221,9 +1258,21 @@ internal sealed class ConfigEditorForm : Form
             var value = obj is null
                 ? defaults.Language
                 : ReadString(obj, "language", defaults.Language);
+            var configuredAutoStart = obj is null
+                ? defaults.AutoStart
+                : ReadBool(obj, "autoStart", defaults.AutoStart);
 
             var normalized = GeneralConfig.NormalizeLanguage(value) ?? defaults.Language;
             SetComboValue(_language, normalized);
+
+            try
+            {
+                _autoStart.Checked = WindowsAutoStartManager.IsEnabled();
+            }
+            catch
+            {
+                _autoStart.Checked = configuredAutoStart;
+            }
         }
 
         public JsonNode BuildNode()
@@ -1232,7 +1281,8 @@ internal sealed class ConfigEditorForm : Form
             var normalized = GeneralConfig.NormalizeLanguage(selected) ?? GeneralConfig.English;
             return new JsonObject
             {
-                ["language"] = normalized
+                ["language"] = normalized,
+                ["autoStart"] = _autoStart.Checked
             };
         }
 
