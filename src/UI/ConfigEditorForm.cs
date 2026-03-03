@@ -1229,6 +1229,8 @@ internal sealed class ConfigEditorForm : Form
     {
         private static readonly string[] FieldLabels = ["language", "autoStart"];
         private static readonly string[] SupportedLanguages = [GeneralConfig.English, GeneralConfig.ChineseSimplified];
+        private const int InputRowMinHeight = 26;
+        private const int InputRowMinWidth = 160;
 
         private Localizer _i18n;
         private readonly Action _markDirty;
@@ -1243,8 +1245,8 @@ internal sealed class ConfigEditorForm : Form
             _markDirty = markDirty;
             _panel.Controls.Add(_grid);
 
-            AddRow(_grid, 0, T("language", "语言"), _language);
-            AddRow(_grid, 1, T("autoStart", "开机自启动"), _autoStart);
+            AddLanguageRow(0);
+            AddAutoStartRow(1);
             _language.SelectedIndexChanged += (_, _) => _markDirty();
             _autoStart.CheckedChanged += (_, _) => _markDirty();
         }
@@ -1284,6 +1286,75 @@ internal sealed class ConfigEditorForm : Form
                 ["language"] = normalized,
                 ["autoStart"] = _autoStart.Checked
             };
+        }
+
+        private void AddLanguageRow(int row)
+        {
+            var label = new Label
+            {
+                Text = T("language", "语言"),
+                Font = LabelMonoFont,
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 4, 4, 0)
+            };
+
+            var rowHost = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 1,
+                RowCount = 1,
+                AutoSize = true,
+                Margin = new Padding(0, 4, 0, 0)
+            };
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            rowHost.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            _language.Dock = DockStyle.None;
+            _language.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            _language.Margin = new Padding(0);
+            _language.MinimumSize = new Size(InputRowMinWidth, InputRowMinHeight);
+
+            rowHost.Controls.Add(_language, 0, 0);
+
+            _grid.Controls.Add(label, 0, row);
+            _grid.Controls.Add(rowHost, 1, row);
+            _grid.SetColumnSpan(rowHost, 2);
+        }
+
+        private void AddAutoStartRow(int row)
+        {
+            var label = new Label
+            {
+                Text = T("autoStart", "开机自启动"),
+                Font = LabelMonoFont,
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 4, 4, 0)
+            };
+
+            var rowHost = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 1,
+                RowCount = 1,
+                AutoSize = false,
+                Height = InputRowMinHeight,
+                MinimumSize = new Size(InputRowMinWidth, InputRowMinHeight),
+                Margin = new Padding(0, 4, 0, 0)
+            };
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            rowHost.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            _autoStart.Anchor = AnchorStyles.Left;
+            _autoStart.Margin = new Padding(0);
+            _autoStart.AutoSize = true;
+
+            rowHost.Controls.Add(_autoStart, 0, 0);
+
+            _grid.Controls.Add(label, 0, row);
+            _grid.Controls.Add(rowHost, 1, row);
+            _grid.SetColumnSpan(rowHost, 2);
         }
 
         private static void SetComboValue(ComboBox combo, string value)
