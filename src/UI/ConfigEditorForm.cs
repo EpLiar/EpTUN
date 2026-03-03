@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Net;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 namespace EpTUN;
 
@@ -1455,6 +1457,24 @@ internal sealed class ConfigEditorForm : Form
     private sealed class Tun2SocksSectionEditor : ISectionEditor
     {
         private static readonly string[] FieldLabels = ["executablePath", "wintunDllPath", "argumentsTemplate"];
+        private static readonly string[] RequiredWintunExports =
+        [
+            "WintunCreateAdapter",
+            "WintunOpenAdapter",
+            "WintunCloseAdapter",
+            "WintunDeleteDriver",
+            "WintunGetAdapterLUID",
+            "WintunGetAdapterIndex",
+            "WintunGetRunningDriverVersion",
+            "WintunSetLogger",
+            "WintunStartSession",
+            "WintunEndSession",
+            "WintunGetReadWaitEvent",
+            "WintunReceivePacket",
+            "WintunReleaseReceivePacket",
+            "WintunAllocateSendPacket",
+            "WintunSendPacket"
+        ];
 
         private Localizer _i18n;
         private readonly IWin32Window _owner;
@@ -1473,7 +1493,12 @@ internal sealed class ConfigEditorForm : Form
             Font = new Font("Consolas", 9.0f, FontStyle.Regular, GraphicsUnit.Point)
         };
         private readonly Button _testButton = new() { AutoSize = true };
+        private readonly Button _wintunTestButton = new() { AutoSize = true };
         private bool _isTesting;
+        private bool _isWintunTesting;
+
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        private delegate uint WintunGetRunningDriverVersionDelegate();
 
         public Tun2SocksSectionEditor(IWin32Window owner, string appConfigPath, Action markDirty, Localizer i18n)
         {
@@ -1484,6 +1509,7 @@ internal sealed class ConfigEditorForm : Form
             _markDirty = markDirty;
             _panel.Controls.Add(_grid);
             _testButton.Text = T("Test", "测试");
+            _wintunTestButton.Text = T("Test", "测试");
 
             var browseButton = new Button
             {
@@ -1538,14 +1564,16 @@ internal sealed class ConfigEditorForm : Form
             wintunDownloadButton.Click += (_, _) => OpenWintunDownloadPage();
 
             _testButton.Click += async (_, _) => await TestExecutableAsync();
+            _wintunTestButton.Click += (_, _) => TestWintunDll();
             ApplyUniformActionButtonWidth(
                 browseButton,
                 _testButton,
                 downloadButton,
                 wintunBrowseButton,
+                _wintunTestButton,
                 wintunDownloadButton);
             AddExecutablePathRow(0, browseButton, downloadButton);
-            AddWintunDllPathRow(1, wintunBrowseButton, wintunDownloadButton);
+            AddWintunDllPathRow(1, wintunBrowseButton, _wintunTestButton, wintunDownloadButton);
             AddRow(_grid, 2, T("argumentsTemplate", "启动参数模板"), _argumentsTemplate);
 
             _executablePath.TextChanged += (_, _) => _markDirty();
@@ -1646,7 +1674,7 @@ internal sealed class ConfigEditorForm : Form
             }
         }
 
-        private void AddWintunDllPathRow(int row, Button browseButton, Button downloadButton)
+        private void AddWintunDllPathRow(int row, Button browseButton, Button testButton, Button downloadButton)
         {
             var label = new Label
             {
@@ -1660,12 +1688,13 @@ internal sealed class ConfigEditorForm : Form
             var rowHost = new TableLayoutPanel
             {
                 Dock = DockStyle.Top,
-                ColumnCount = 3,
+                ColumnCount = 4,
                 RowCount = 1,
                 AutoSize = true,
                 Margin = new Padding(0, 4, 0, 0)
             };
             rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             rowHost.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
@@ -1677,12 +1706,15 @@ internal sealed class ConfigEditorForm : Form
 
             browseButton.Margin = new Padding(8, 0, 0, 0);
             browseButton.Anchor = AnchorStyles.Left;
+            testButton.Margin = new Padding(8, 0, 0, 0);
+            testButton.Anchor = AnchorStyles.Left;
             downloadButton.Margin = new Padding(8, 0, 0, 0);
             downloadButton.Anchor = AnchorStyles.Left;
 
             rowHost.Controls.Add(_wintunDllPath, 0, 0);
             rowHost.Controls.Add(browseButton, 1, 0);
-            rowHost.Controls.Add(downloadButton, 2, 0);
+            rowHost.Controls.Add(testButton, 2, 0);
+            rowHost.Controls.Add(downloadButton, 3, 0);
 
             _grid.Controls.Add(label, 0, row);
             _grid.Controls.Add(rowHost, 1, row);
@@ -1823,6 +1855,101 @@ internal sealed class ConfigEditorForm : Form
             }
         }
 
+        private void TestWintunDll()
+        {
+            if (_isWintunTesting)
+            {
+                return;
+            }
+
+            var dllPath = ResolveWintunDllPath();
+            if (string.IsNullOrWhiteSpace(dllPath))
+            {
+                MessageBox.Show(
+                    _owner,
+                    T("Please set tun2socks.wintunDllPath first.", "请先设置 tun2socks.wintunDllPath。"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!File.Exists(dllPath))
+            {
+                MessageBox.Show(
+                    _owner,
+                    T(
+                        $"Wintun DLL not found:{Environment.NewLine}{dllPath}{Environment.NewLine}(configured value: {_wintunDllPath.Text.Trim()})",
+                        $"未找到 Wintun DLL：{Environment.NewLine}{dllPath}{Environment.NewLine}(配置值：{_wintunDllPath.Text.Trim()})"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
+            _isWintunTesting = true;
+            _wintunTestButton.Enabled = false;
+            var originalText = _wintunTestButton.Text;
+            _wintunTestButton.Text = T("Testing...", "测试中...");
+
+            try
+            {
+                var report = new StringBuilder();
+                report.AppendLine(T("Wintun DLL detailed test:", "Wintun DLL 详细测试："));
+                report.AppendLine($"- {T("Path", "路径")}: {dllPath}");
+                report.AppendLine($"- {T("Size", "大小")}: {new FileInfo(dllPath).Length} bytes");
+                report.AppendLine($"- SHA256: {ComputeSha256Hex(dllPath)}");
+                report.AppendLine($"- {T("Current process", "当前进程")}: {(Environment.Is64BitProcess ? "x64" : "x86")}");
+
+                var machineLine = ReadPeMachineDisplay(dllPath);
+                report.AppendLine($"- PE: {machineLine}");
+
+                nint handle = 0;
+                try
+                {
+                    handle = NativeLibrary.Load(dllPath);
+                    var exportCheck = ValidateWintunExports(handle);
+                    report.AppendLine($"- {T("Required exports", "必需导出")}: {exportCheck.FoundCount}/{RequiredWintunExports.Length}");
+                    if (exportCheck.MissingExports.Count > 0)
+                    {
+                        report.AppendLine($"- {T("Missing exports", "缺失导出")}: {string.Join(", ", exportCheck.MissingExports)}");
+                    }
+
+                    var driverVersionText = TryReadRunningDriverVersion(handle);
+                    report.AppendLine($"- {T("Running driver version", "运行中驱动版本")}: {driverVersionText}");
+                }
+                finally
+                {
+                    if (handle != 0)
+                    {
+                        NativeLibrary.Free(handle);
+                    }
+                }
+
+                MessageBox.Show(
+                    _owner,
+                    report.ToString(),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    _owner,
+                    T($"Wintun DLL test failed: {ex.Message}", $"Wintun DLL 测试失败：{ex.Message}"),
+                    T("EpTUN Config Editor", "EpTUN 配置编辑器"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            finally
+            {
+                _wintunTestButton.Text = originalText;
+                _wintunTestButton.Enabled = true;
+                _isWintunTesting = false;
+            }
+        }
+
         private async Task<ProcessProbeResult> RunProbeAsync(string executablePath, string arguments, int timeoutMs)
         {
             using var process = new Process
@@ -1872,9 +1999,112 @@ internal sealed class ConfigEditorForm : Form
             return new ProcessProbeResult(arguments, process.ExitCode, output);
         }
 
+        private static string ComputeSha256Hex(string filePath)
+        {
+            using var stream = File.OpenRead(filePath);
+            var hash = SHA256.HashData(stream);
+            return Convert.ToHexString(hash);
+        }
+
+        private static string ReadPeMachineDisplay(string dllPath)
+        {
+            try
+            {
+                using var stream = File.OpenRead(dllPath);
+                using var reader = new BinaryReader(stream);
+                if (stream.Length < 0x40)
+                {
+                    return "unknown (file too small)";
+                }
+
+                stream.Seek(0x3C, SeekOrigin.Begin);
+                var peOffset = reader.ReadInt32();
+                if (peOffset < 0 || peOffset + 6 > stream.Length)
+                {
+                    return "unknown (invalid PE header offset)";
+                }
+
+                stream.Seek(peOffset, SeekOrigin.Begin);
+                var peSignature = reader.ReadUInt32();
+                if (peSignature != 0x00004550)
+                {
+                    return "unknown (missing PE signature)";
+                }
+
+                var machine = reader.ReadUInt16();
+                return machine switch
+                {
+                    0x8664 => "x64 (0x8664)",
+                    0x014C => "x86 (0x014C)",
+                    0xAA64 => "ARM64 (0xAA64)",
+                    _ => $"0x{machine:X4}"
+                };
+            }
+            catch (Exception ex)
+            {
+                return $"unknown ({ex.Message})";
+            }
+        }
+
+        private static (int FoundCount, IReadOnlyList<string> MissingExports) ValidateWintunExports(nint libraryHandle)
+        {
+            var missing = new List<string>();
+            var found = 0;
+
+            foreach (var exportName in RequiredWintunExports)
+            {
+                if (NativeLibrary.TryGetExport(libraryHandle, exportName, out _))
+                {
+                    found++;
+                }
+                else
+                {
+                    missing.Add(exportName);
+                }
+            }
+
+            return (found, missing);
+        }
+
+        private string TryReadRunningDriverVersion(nint libraryHandle)
+        {
+            if (!NativeLibrary.TryGetExport(libraryHandle, "WintunGetRunningDriverVersion", out var proc))
+            {
+                return T("API not exported", "未导出该 API");
+            }
+
+            try
+            {
+                var getVersion = Marshal.GetDelegateForFunctionPointer<WintunGetRunningDriverVersionDelegate>(proc);
+                var version = getVersion();
+                if (version == 0)
+                {
+                    return T("0 (driver not active yet)", "0（驱动尚未激活）");
+                }
+
+                var major = (version >> 16) & 0xFFFF;
+                var minor = version & 0xFFFF;
+                return $"{major}.{minor} (0x{version:X8})";
+            }
+            catch (Exception ex)
+            {
+                return T($"read failed: {ex.Message}", $"读取失败：{ex.Message}");
+            }
+        }
+
         private string ResolveExecutablePath()
         {
-            var configured = _executablePath.Text.Trim();
+            return ResolveConfiguredPath(_executablePath.Text);
+        }
+
+        private string ResolveWintunDllPath()
+        {
+            return ResolveConfiguredPath(_wintunDllPath.Text);
+        }
+
+        private string ResolveConfiguredPath(string configuredPath)
+        {
+            var configured = configuredPath.Trim();
             if (string.IsNullOrWhiteSpace(configured))
             {
                 return string.Empty;
