@@ -4,11 +4,12 @@ using System.Net.Sockets;
 
 namespace EpTUN;
 
-public sealed class VpnSession
+internal sealed class VpnSession
 {
     private readonly AppConfig _config;
     private readonly string _configDirectory;
     private readonly bool? _bypassCnOverride;
+    private readonly Localizer _i18n;
     private readonly TextWriter _log;
     private readonly TextWriter _error;
     private readonly WindowsRouteManager _routeManager;
@@ -21,15 +22,17 @@ public sealed class VpnSession
         string configPath,
         TextWriter log,
         TextWriter error,
+        Localizer i18n,
         bool? bypassCnOverride = null)
     {
         _config = config;
         _configDirectory = Path.GetDirectoryName(Path.GetFullPath(configPath))
             ?? AppContext.BaseDirectory;
         _bypassCnOverride = bypassCnOverride;
+        _i18n = i18n;
         _log = log;
         _error = error;
-        _routeManager = new WindowsRouteManager(log, error);
+        _routeManager = new WindowsRouteManager(log, error, i18n);
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -42,15 +45,18 @@ public sealed class VpnSession
         var dynamicExcludeRoutes = await ResolveDynamicExcludeRoutesAsync(cancellationToken);
         var cnExcludeRoutes = ResolveCnExcludeRoutes();
 
-        _log.WriteLine($"[INFO] Proxy endpoint: {proxyUri}");
-        _log.WriteLine($"[INFO] Default gateway before VPN: {defaultRoute.Gateway}");
+        _log.WriteLine(T($"[INFO] 代理端点：{proxyUri}", $"[INFO] Proxy endpoint: {proxyUri}"));
+        _log.WriteLine(T($"[INFO] VPN 启动前的默认网关：{defaultRoute.Gateway}", $"[INFO] Default gateway before VPN: {defaultRoute.Gateway}"));
         if (defaultRouteV6 is not null)
         {
-            _log.WriteLine($"[INFO] IPv6 default gateway before VPN: {defaultRouteV6.Gateway} (IF {defaultRouteV6.InterfaceIndex})");
+            _log.WriteLine(
+                T(
+                    $"[INFO] VPN 启动前的 IPv6 默认网关：{defaultRouteV6.Gateway}（接口 {defaultRouteV6.InterfaceIndex}）",
+                    $"[INFO] IPv6 default gateway before VPN: {defaultRouteV6.Gateway} (IF {defaultRouteV6.InterfaceIndex})"));
         }
         else
         {
-            _log.WriteLine("[INFO] IPv6 default route not found. IPv6 bypass routes will be skipped.");
+            _log.WriteLine(T("[INFO] 未找到 IPv6 默认路由，将跳过 IPv6 绕过路由。", "[INFO] IPv6 default route not found. IPv6 bypass routes will be skipped."));
         }
 
         _tun2SocksProcess = StartTun2Socks(proxyUri);
@@ -69,13 +75,14 @@ public sealed class VpnSession
             if (_tun2SocksProcess.HasExited)
             {
                 throw new InvalidOperationException(
-                    $"tun2socks exited early with code {_tun2SocksProcess.ExitCode}. " +
-                    "Check previous [tun2socks] logs for details.");
+                    T(
+                        $"tun2socks 提前退出，退出码 {_tun2SocksProcess.ExitCode}。请检查前面的 [tun2socks] 日志。",
+                        $"tun2socks exited early with code {_tun2SocksProcess.ExitCode}. Check previous [tun2socks] logs for details."));
             }
 
             await EnsureTunInterfaceConfiguredAsync(cancellationToken);
             var tunInterfaceIndex = await _routeManager.GetInterfaceIndexByNameAsync(_config.Vpn.InterfaceName, cancellationToken);
-            _log.WriteLine($"[INFO] TUN interface index: {tunInterfaceIndex}");
+            _log.WriteLine(T($"[INFO] TUN 接口索引：{tunInterfaceIndex}", $"[INFO] TUN interface index: {tunInterfaceIndex}"));
             await ApplyRoutesAsync(
                 defaultRoute.Gateway,
                 defaultRouteV6,
@@ -85,7 +92,7 @@ public sealed class VpnSession
                 cnExcludeRoutes,
                 cancellationToken);
 
-            _log.WriteLine("[INFO] VPN routes applied. Press Ctrl+C to stop.");
+            _log.WriteLine(T("[INFO] VPN 路由已应用。按 Ctrl+C 可停止。", "[INFO] VPN routes applied. Press Ctrl+C to stop."));
 
             var exitTask = _tun2SocksProcess.WaitForExitAsync(CancellationToken.None);
             var cancelTask = Task.Delay(Timeout.Infinite, cancellationToken);
@@ -93,7 +100,10 @@ public sealed class VpnSession
             var completed = await Task.WhenAny(exitTask, cancelTask);
             if (completed == exitTask && !cancellationToken.IsCancellationRequested)
             {
-                throw new InvalidOperationException($"tun2socks exited unexpectedly with code {_tun2SocksProcess.ExitCode}.");
+                throw new InvalidOperationException(
+                    T(
+                        $"tun2socks 异常退出，退出码 {_tun2SocksProcess.ExitCode}。",
+                        $"tun2socks exited unexpectedly with code {_tun2SocksProcess.ExitCode}."));
             }
         }
         finally
@@ -130,7 +140,7 @@ public sealed class VpnSession
         }
         catch (Exception ex)
         {
-            _error.WriteLine($"[WARN] Failed to resolve IPv6 default route: {ex.Message}");
+            _error.WriteLine(T($"[WARN] 解析 IPv6 默认路由失败：{ex.Message}", $"[WARN] Failed to resolve IPv6 default route: {ex.Message}"));
             return null;
         }
     }
@@ -146,7 +156,7 @@ public sealed class VpnSession
 
         try
         {
-            return await V2RayATouchClient.ResolveProxyUriAsync(_config.V2RayA, _config.Proxy, _log, cancellationToken);
+            return await V2RayATouchClient.ResolveProxyUriAsync(_config.V2RayA, _config.Proxy, _log, _i18n, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -154,7 +164,10 @@ public sealed class VpnSession
         }
         catch (Exception ex)
         {
-            _error.WriteLine($"[WARN] v2rayA /api/ports failed, fallback to proxy config: {ex.Message}");
+            _error.WriteLine(
+                T(
+                    $"[WARN] v2rayA /api/ports 调用失败，将回退到 proxy 配置：{ex.Message}",
+                    $"[WARN] v2rayA /api/ports failed, fallback to proxy config: {ex.Message}"));
             return fallback;
         }
     }
@@ -173,7 +186,7 @@ public sealed class VpnSession
             .ToArray();
     }
 
-    private static async Task EnsureProxyEndpointReachableAsync(Uri proxyUri, CancellationToken cancellationToken)
+    private async Task EnsureProxyEndpointReachableAsync(Uri proxyUri, CancellationToken cancellationToken)
     {
         try
         {
@@ -189,9 +202,12 @@ public sealed class VpnSession
         catch (Exception ex)
         {
             throw new InvalidOperationException(
-                $"Proxy endpoint is not reachable: {proxyUri}. Check local proxy service and port. {ex.Message}");
+                T(
+                    $"代理端点不可达：{proxyUri}。请检查本地代理服务和端口。{ex.Message}",
+                    $"Proxy endpoint is not reachable: {proxyUri}. Check local proxy service and port. {ex.Message}"));
         }
     }
+
     private async Task<IReadOnlyCollection<CidrRoute>> ResolveDynamicExcludeRoutesAsync(CancellationToken cancellationToken)
     {
         if (!_config.V2RayA.Enabled)
@@ -201,7 +217,7 @@ public sealed class VpnSession
 
         try
         {
-            return await V2RayATouchClient.ResolveExcludeCidrsAsync(_config.V2RayA, _log, cancellationToken);
+            return await V2RayATouchClient.ResolveExcludeCidrsAsync(_config.V2RayA, _log, _i18n, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -209,7 +225,7 @@ public sealed class VpnSession
         }
         catch (Exception ex)
         {
-            _error.WriteLine($"[WARN] v2rayA auto excludeCidrs failed: {ex.Message}");
+            _error.WriteLine(T($"[WARN] v2rayA 自动 excludeCidrs 失败：{ex.Message}", $"[WARN] v2rayA auto excludeCidrs failed: {ex.Message}"));
             return [];
         }
     }
@@ -224,7 +240,7 @@ public sealed class VpnSession
         var cnDatPath = ResolveCnDatPath();
         if (!File.Exists(cnDatPath))
         {
-            _error.WriteLine($"[WARN] CN dat file not found: {cnDatPath}");
+            _error.WriteLine(T($"[WARN] 未找到 CN dat 文件：{cnDatPath}", $"[WARN] CN dat file not found: {cnDatPath}"));
             return [];
         }
 
@@ -234,12 +250,14 @@ public sealed class VpnSession
             var ipv4Count = routes.Count(static x => x.IsIPv4);
             var ipv6Count = routes.Count - ipv4Count;
             _log.WriteLine(
-                $"[INFO] Bypass CN: loaded {ipv4Count} IPv4 + {ipv6Count} IPv6 CIDRs from {cnDatPath}");
+                T(
+                    $"[INFO] Bypass CN：已从 {cnDatPath} 加载 {ipv4Count} 条 IPv4 和 {ipv6Count} 条 IPv6 CIDR。",
+                    $"[INFO] Bypass CN: loaded {ipv4Count} IPv4 + {ipv6Count} IPv6 CIDRs from {cnDatPath}"));
             return routes;
         }
         catch (Exception ex)
         {
-            _error.WriteLine($"[WARN] Failed to load CN routes: {ex.Message}");
+            _error.WriteLine(T($"[WARN] 加载 CN 路由失败：{ex.Message}", $"[WARN] Failed to load CN routes: {ex.Message}"));
             return [];
         }
     }
@@ -286,7 +304,9 @@ public sealed class VpnSession
                 await ConfigureTunDnsAsync(cancellationToken);
 
                 _log.WriteLine(
-                    $"[INFO] TUN interface '{_config.Vpn.InterfaceName}' configured: {_config.Vpn.TunAddress}/{_config.Vpn.TunMask}");
+                    T(
+                        $"[INFO] TUN 接口“{_config.Vpn.InterfaceName}”已配置：{_config.Vpn.TunAddress}/{_config.Vpn.TunMask}",
+                        $"[INFO] TUN interface '{_config.Vpn.InterfaceName}' configured: {_config.Vpn.TunAddress}/{_config.Vpn.TunMask}"));
                 return;
             }
             catch (Exception ex)
@@ -300,8 +320,9 @@ public sealed class VpnSession
         }
 
         throw new InvalidOperationException(
-            $"Failed to configure TUN interface '{_config.Vpn.InterfaceName}'. " +
-            "Check vpn.interfaceName and tun2socks device name in appsettings.json.",
+            T(
+                $"配置 TUN 接口“{_config.Vpn.InterfaceName}”失败。请检查 appsettings.json 里的 vpn.interfaceName 和 tun2socks 设备名。",
+                $"Failed to configure TUN interface '{_config.Vpn.InterfaceName}'. Check vpn.interfaceName and tun2socks device name in appsettings.json."),
             lastError);
     }
 
@@ -314,7 +335,9 @@ public sealed class VpnSession
         if (result.ExitCode != 0)
         {
             throw new InvalidOperationException(
-                $"Failed to set TUN address. netsh {args}\n{result.Stdout}\n{result.Stderr}".Trim());
+                T(
+                    $"设置 TUN 地址失败。命令：netsh {args}\n{result.Stdout}\n{result.Stderr}".Trim(),
+                    $"Failed to set TUN address. netsh {args}\n{result.Stdout}\n{result.Stderr}".Trim()));
         }
     }
 
@@ -333,7 +356,9 @@ public sealed class VpnSession
         if (primaryResult.ExitCode != 0)
         {
             throw new InvalidOperationException(
-                $"Failed to set primary DNS. netsh {setPrimaryArgs}\n{primaryResult.Stdout}\n{primaryResult.Stderr}".Trim());
+                T(
+                    $"设置主 DNS 失败。命令：netsh {setPrimaryArgs}\n{primaryResult.Stdout}\n{primaryResult.Stderr}".Trim(),
+                    $"Failed to set primary DNS. netsh {setPrimaryArgs}\n{primaryResult.Stdout}\n{primaryResult.Stderr}".Trim()));
         }
 
         for (var i = 1; i < _config.Vpn.DnsServers.Length; i++)
@@ -346,7 +371,9 @@ public sealed class VpnSession
             if (addResult.ExitCode != 0)
             {
                 throw new InvalidOperationException(
-                    $"Failed to add DNS server {dns}. netsh {addArgs}\n{addResult.Stdout}\n{addResult.Stderr}".Trim());
+                    T(
+                        $"添加 DNS 服务器 {dns} 失败。命令：netsh {addArgs}\n{addResult.Stdout}\n{addResult.Stderr}".Trim(),
+                        $"Failed to add DNS server {dns}. netsh {addArgs}\n{addResult.Stdout}\n{addResult.Stderr}".Trim()));
             }
         }
     }
@@ -385,7 +412,9 @@ public sealed class VpnSession
             if (skippedTotalV6 > 0)
             {
                 _log.WriteLine(
-                    $"[INFO] IPv6 include routes are not configured; skipped {skippedTotalV6} IPv6 exclude routes ({skippedBaseV6} static, {skippedDynamicV6} dynamic, {skippedCnV6} CN).");
+                    T(
+                        $"[INFO] 未配置 IPv6 包含路由，已跳过 {skippedTotalV6} 条 IPv6 排除路由（静态 {skippedBaseV6}、动态 {skippedDynamicV6}、CN {skippedCnV6}）。",
+                        $"[INFO] IPv6 include routes are not configured; skipped {skippedTotalV6} IPv6 exclude routes ({skippedBaseV6} static, {skippedDynamicV6} dynamic, {skippedCnV6} CN)."));
             }
 
             effectiveBaseExcludeRoutes = baseExcludeRoutes.Where(static x => x.IsIPv4).ToArray();
@@ -443,13 +472,17 @@ public sealed class VpnSession
             if (skippedProxyIpv6NoInclude > 0)
             {
                 _log.WriteLine(
-                    $"[INFO] Skipped {skippedProxyIpv6NoInclude} IPv6 proxy bypass routes because IPv6 include routes are not configured.");
+                    T(
+                        $"[INFO] 由于未配置 IPv6 包含路由，已跳过 {skippedProxyIpv6NoInclude} 条 IPv6 代理绕过路由。",
+                        $"[INFO] Skipped {skippedProxyIpv6NoInclude} IPv6 proxy bypass routes because IPv6 include routes are not configured."));
             }
 
             if (skippedProxyIpv6NoDefaultRoute > 0)
             {
                 _error.WriteLine(
-                    $"[WARN] Skipped {skippedProxyIpv6NoDefaultRoute} IPv6 proxy bypass routes: no IPv6 default route.");
+                    T(
+                        $"[WARN] 已跳过 {skippedProxyIpv6NoDefaultRoute} 条 IPv6 代理绕过路由：没有 IPv6 默认路由。",
+                        $"[WARN] Skipped {skippedProxyIpv6NoDefaultRoute} IPv6 proxy bypass routes: no IPv6 default route."));
             }
         }
 
@@ -465,7 +498,9 @@ public sealed class VpnSession
             var dynamicV4 = effectiveDynamicExcludeRoutes.Count(static x => x.IsIPv4);
             var dynamicV6 = effectiveDynamicExcludeRoutes.Count - dynamicV4;
             _log.WriteLine(
-                $"[INFO] Added {effectiveDynamicExcludeRoutes.Count} dynamic exclude routes from v2rayA ({dynamicV4} IPv4, {dynamicV6} IPv6).");
+                T(
+                    $"[INFO] 已从 v2rayA 添加 {effectiveDynamicExcludeRoutes.Count} 条动态排除路由（IPv4 {dynamicV4}、IPv6 {dynamicV6}）。",
+                    $"[INFO] Added {effectiveDynamicExcludeRoutes.Count} dynamic exclude routes from v2rayA ({dynamicV4} IPv4, {dynamicV6} IPv6)."));
         }
 
         if (effectiveCnExcludeRoutes.Count > 0)
@@ -473,13 +508,18 @@ public sealed class VpnSession
             var cnV4 = effectiveCnExcludeRoutes.Count(static x => x.IsIPv4);
             var cnV6 = effectiveCnExcludeRoutes.Count - cnV4;
             _log.WriteLine(
-                $"[INFO] Added {effectiveCnExcludeRoutes.Count} CN exclude routes ({cnV4} IPv4, {cnV6} IPv6).");
+                T(
+                    $"[INFO] 已添加 {effectiveCnExcludeRoutes.Count} 条 CN 排除路由（IPv4 {cnV4}、IPv6 {cnV6}）。",
+                    $"[INFO] Added {effectiveCnExcludeRoutes.Count} CN exclude routes ({cnV4} IPv4, {cnV6} IPv6)."));
         }
 
         var verboseExcludeLogs = allExcludeRoutes.Length <= 200;
         if (!verboseExcludeLogs)
         {
-            _log.WriteLine($"[INFO] Applying {allExcludeRoutes.Length} exclude routes (route-level logs suppressed).");
+            _log.WriteLine(
+                T(
+                    $"[INFO] 正在应用 {allExcludeRoutes.Length} 条排除路由（单条路由日志已抑制）。",
+                    $"[INFO] Applying {allExcludeRoutes.Length} exclude routes (route-level logs suppressed)."));
         }
 
         var excludeRouteApplyStopwatch = Stopwatch.StartNew();
@@ -508,7 +548,7 @@ public sealed class VpnSession
 
             if (!verboseExcludeLogs && ((i + 1) % 500 == 0 || i == allExcludeRoutes.Length - 1))
             {
-                _log.WriteLine($"[INFO] Applied {i + 1}/{allExcludeRoutes.Length} exclude routes...");
+                _log.WriteLine(T($"[INFO] 已应用 {i + 1}/{allExcludeRoutes.Length} 条排除路由...", $"[INFO] Applied {i + 1}/{allExcludeRoutes.Length} exclude routes..."));
             }
         }
 
@@ -516,12 +556,14 @@ public sealed class VpnSession
         if (allExcludeRoutes.Length > 0)
         {
             _log.WriteLine(
-                $"[INFO] Exclude routes apply completed in {excludeRouteApplyStopwatch.Elapsed.TotalSeconds:F1}s for {allExcludeRoutes.Length} routes.");
+                T(
+                    $"[INFO] 排除路由应用完成：共 {allExcludeRoutes.Length} 条，耗时 {excludeRouteApplyStopwatch.Elapsed.TotalSeconds:F1}s。",
+                    $"[INFO] Exclude routes apply completed in {excludeRouteApplyStopwatch.Elapsed.TotalSeconds:F1}s for {allExcludeRoutes.Length} routes."));
         }
 
         if (skippedIpv6Exclude > 0)
         {
-            _error.WriteLine($"[WARN] Skipped {skippedIpv6Exclude} IPv6 exclude routes: no IPv6 default route.");
+            _error.WriteLine(T($"[WARN] 已跳过 {skippedIpv6Exclude} 条 IPv6 排除路由：没有 IPv6 默认路由。", $"[WARN] Skipped {skippedIpv6Exclude} IPv6 exclude routes: no IPv6 default route."));
         }
         // Enable global hijack after bypass routes are in place to avoid startup race conditions.
         foreach (var cidr in includeRoutes)
@@ -536,7 +578,7 @@ public sealed class VpnSession
             }
         }
 
-        _log.WriteLine($"[INFO] Core include routes applied ({includeRoutes.Length}).");
+        _log.WriteLine(T($"[INFO] 核心包含路由已应用（{includeRoutes.Length} 条）。", $"[INFO] Core include routes applied ({includeRoutes.Length})."));
     }
     private async Task AddManagedRouteAsync(
         CidrRoute route,
@@ -561,7 +603,10 @@ public sealed class VpnSession
             var nextHop = gateway is null
                 ? $"on-link IF {interfaceIndex?.ToString() ?? "?"}"
                 : gateway.ToString();
-            _log.WriteLine($"[INFO] Route {route.Network}/{route.PrefixLength} -> {nextHop} (metric {metric})");
+            _log.WriteLine(
+                T(
+                    $"[INFO] 路由 {route.Network}/{route.PrefixLength} -> {nextHop}（metric {metric}）",
+                    $"[INFO] Route {route.Network}/{route.PrefixLength} -> {nextHop} (metric {metric})"));
         }
     }
 
@@ -586,13 +631,13 @@ public sealed class VpnSession
         var exePath = ResolveTun2SocksExecutablePath();
         if (!File.Exists(exePath))
         {
-            throw new FileNotFoundException($"tun2socks executable not found: {exePath}");
+            throw new FileNotFoundException(T($"未找到 tun2socks 可执行文件：{exePath}", $"tun2socks executable not found: {exePath}"));
         }
 
         EnsureWintunDllAvailable(exePath);
 
         var arguments = BuildTun2SocksArgs(proxyUri);
-        _log.WriteLine($"[INFO] Starting tun2socks: {exePath} {arguments}");
+        _log.WriteLine(T($"[INFO] 正在启动 tun2socks：{exePath} {arguments}", $"[INFO] Starting tun2socks: {exePath} {arguments}"));
 
         var workingDirectory = Path.GetDirectoryName(exePath)
             ?? AppContext.BaseDirectory;
@@ -613,7 +658,7 @@ public sealed class VpnSession
 
         if (!process.Start())
         {
-            throw new InvalidOperationException("Failed to start tun2socks.");
+            throw new InvalidOperationException(T("启动 tun2socks 失败。", "Failed to start tun2socks."));
         }
 
         return process;
@@ -659,14 +704,15 @@ public sealed class VpnSession
         if (candidates.Length > 0)
         {
             File.Copy(candidates[0], targetPath, overwrite: false);
-            _log.WriteLine($"[INFO] Copied wintun.dll to: {targetPath}");
+            _log.WriteLine(T($"[INFO] 已复制 wintun.dll 到：{targetPath}", $"[INFO] Copied wintun.dll to: {targetPath}"));
             return;
         }
 
         var configuredPath = _config.Tun2Socks.WintunDllPath.Trim();
         throw new FileNotFoundException(
-            $"wintun.dll not found. Checked tun2Socks.wintunDllPath='{configuredPath}' and fallback paths. " +
-            "Put x64 wintun.dll in the same directory as tun2socks.exe or update tun2Socks.wintunDllPath.",
+            T(
+                $"未找到 wintun.dll。已检查 tun2Socks.wintunDllPath='{configuredPath}' 及回退路径。请将 x64 的 wintun.dll 放到 tun2socks.exe 同目录，或更新 tun2Socks.wintunDllPath。",
+                $"wintun.dll not found. Checked tun2Socks.wintunDllPath='{configuredPath}' and fallback paths. Put x64 wintun.dll in the same directory as tun2socks.exe or update tun2Socks.wintunDllPath."),
             targetPath);
     }
 
@@ -735,7 +781,7 @@ public sealed class VpnSession
         }
         catch (Exception ex)
         {
-            _error.WriteLine($"[WARN] Failed to stop tun2socks: {ex.Message}");
+            _error.WriteLine(T($"[WARN] 停止 tun2socks 失败：{ex.Message}", $"[WARN] Failed to stop tun2socks: {ex.Message}"));
         }
 
         _tun2SocksProcess.Dispose();
@@ -747,7 +793,7 @@ public sealed class VpnSession
         return $"\"{value.Replace("\"", string.Empty)}\"";
     }
 
-    private static async Task<CommandResult> RunCommandAsync(
+    private async Task<CommandResult> RunCommandAsync(
         string fileName,
         string arguments,
         CancellationToken cancellationToken)
@@ -767,7 +813,7 @@ public sealed class VpnSession
 
         if (!process.Start())
         {
-            throw new InvalidOperationException($"Failed to start process: {fileName}");
+            throw new InvalidOperationException(T($"启动进程失败：{fileName}", $"Failed to start process: {fileName}"));
         }
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
@@ -807,6 +853,11 @@ public sealed class VpnSession
     private sealed record ManagedRoute(CidrRoute Route, IPAddress? Gateway, int? InterfaceIndex);
 
     private sealed record CommandResult(int ExitCode, string Stdout, string Stderr);
+
+    private string T(string chineseSimplified, string english)
+    {
+        return _i18n.Text(english, chineseSimplified);
+    }
 }
 
 

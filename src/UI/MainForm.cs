@@ -63,7 +63,7 @@ internal sealed class MainForm : Form
         {
             try
             {
-                _fileLogSink = FileLogSink.Create(configPath);
+                _fileLogSink = FileLogSink.Create(configPath, _i18n);
             }
             catch (Exception ex)
             {
@@ -404,7 +404,7 @@ internal sealed class MainForm : Form
 
         try
         {
-            var nextSink = FileLogSink.Create(configPath);
+            var nextSink = FileLogSink.Create(configPath, _i18n);
             _fileLogSink = nextSink;
             _fileLogLevel = nextFileLevel;
             currentSink?.Dispose();
@@ -497,7 +497,7 @@ internal sealed class MainForm : Form
         }
 
         _sessionCts = new CancellationTokenSource();
-        var session = new VpnSession(config, configPath, _logWriter, _errorWriter, bypassCnEnabled);
+        var session = new VpnSession(config, configPath, _logWriter, _errorWriter, _i18n, bypassCnEnabled);
 
         _isRunning = true;
         SetStatusText(T("Status: running", "状态：运行中"));

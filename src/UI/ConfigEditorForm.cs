@@ -368,7 +368,7 @@ internal sealed class ConfigEditorForm : Form
 
         try
         {
-            return await V2RayATouchClient.TestConnectionAsync(v2rayAConfig, proxyConfig, logWriter, cts.Token);
+            return await V2RayATouchClient.TestConnectionAsync(v2rayAConfig, proxyConfig, logWriter, _i18n, cts.Token);
         }
         catch (OperationCanceledException)
         {

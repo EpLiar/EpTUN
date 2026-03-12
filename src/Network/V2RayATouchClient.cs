@@ -16,6 +16,7 @@ internal static class V2RayATouchClient
         V2RayAConfig config,
         ProxyConfig fallbackProxy,
         TextWriter log,
+        Localizer i18n,
         CancellationToken cancellationToken)
     {
         var baseUri = config.BuildBaseUri();
@@ -23,10 +24,10 @@ internal static class V2RayATouchClient
 
         var sessionState = GetSessionState(config, baseUri);
         using var httpClient = CreateHttpClient(config, sessionState);
-        var runtimeAuthorization = await ResolveAuthorizationAsync(config, baseUri, httpClient, log, cancellationToken, sessionState);
+        var runtimeAuthorization = await ResolveAuthorizationAsync(config, baseUri, httpClient, log, i18n, cancellationToken, sessionState);
         using var request = BuildRequest(config, baseUri, portsUri, runtimeAuthorization);
 
-        log.WriteLine($"[INFO] Querying v2rayA: {portsUri}");
+        log.WriteLine(T(i18n, $"[INFO] Querying v2rayA: {portsUri}", $"[INFO] 正在请求 v2rayA：{portsUri}"));
         using var response = await httpClient.SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
@@ -36,13 +37,16 @@ internal static class V2RayATouchClient
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"v2rayA /api/ports returned {(int)response.StatusCode} {response.ReasonPhrase}: {TrimForLog(responseText)}");
+                T(
+                    i18n,
+                    $"v2rayA /api/ports returned {(int)response.StatusCode} {response.ReasonPhrase}: {TrimForLog(responseText)}",
+                    $"v2rayA /api/ports 返回 {(int)response.StatusCode} {response.ReasonPhrase}：{TrimForLog(responseText)}"));
         }
 
         using var doc = JsonDocument.Parse(responseText);
         if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
         {
-            throw new InvalidOperationException("v2rayA /api/ports response does not contain data.");
+            throw new InvalidOperationException(T(i18n, "v2rayA /api/ports response does not contain data.", "v2rayA /api/ports 响应不包含 data。"));
         }
 
         var (primaryKey, fallbackKey) = ResolvePortKeys(fallbackProxy.Scheme, config.PreferPacPort);
@@ -53,7 +57,10 @@ internal static class V2RayATouchClient
             (!fallbackPort.HasValue || fallbackPort.Value <= 0))
         {
             throw new InvalidOperationException(
-                $"v2rayA /api/ports did not provide a valid {primaryKey}/{fallbackKey} port.");
+                T(
+                    i18n,
+                    $"v2rayA /api/ports did not provide a valid {primaryKey}/{fallbackKey} port.",
+                    $"v2rayA /api/ports 未提供有效的 {primaryKey}/{fallbackKey} 端口。"));
         }
 
         var host = string.IsNullOrWhiteSpace(config.ProxyHostOverride)
@@ -73,21 +80,34 @@ internal static class V2RayATouchClient
         {
             if (await IsProxyEndpointReachableAsync(candidate.ProxyUri, config.TimeoutMs, cancellationToken))
             {
-                log.WriteLine($"[INFO] v2rayA proxy endpoint selected: {candidate.ProxyUri} ({candidate.Key}, reachable)");
+                log.WriteLine(
+                    T(
+                        i18n,
+                        $"[INFO] v2rayA proxy endpoint selected: {candidate.ProxyUri} ({candidate.Key}, reachable)",
+                        $"[INFO] 已选择 v2rayA 代理端点：{candidate.ProxyUri}（{candidate.Key}，可达）"));
                 return candidate.ProxyUri;
             }
 
-            log.WriteLine($"[WARN] v2rayA proxy endpoint not reachable: {candidate.ProxyUri} ({candidate.Key})");
+            log.WriteLine(
+                T(
+                    i18n,
+                    $"[WARN] v2rayA proxy endpoint not reachable: {candidate.ProxyUri} ({candidate.Key})",
+                    $"[WARN] v2rayA 代理端点不可达：{candidate.ProxyUri}（{candidate.Key}）"));
         }
 
         var fallbackCandidate = candidates[0];
-        log.WriteLine($"[WARN] No v2rayA proxy endpoint is reachable; fallback to {fallbackCandidate.ProxyUri} ({fallbackCandidate.Key}).");
+        log.WriteLine(
+            T(
+                i18n,
+                $"[WARN] No v2rayA proxy endpoint is reachable; fallback to {fallbackCandidate.ProxyUri} ({fallbackCandidate.Key}).",
+                $"[WARN] 没有可达的 v2rayA 代理端点，将回退到 {fallbackCandidate.ProxyUri}（{fallbackCandidate.Key}）。"));
         return fallbackCandidate.ProxyUri;
     }
 
     public static async Task<IReadOnlyCollection<CidrRoute>> ResolveExcludeCidrsAsync(
         V2RayAConfig config,
         TextWriter log,
+        Localizer i18n,
         CancellationToken cancellationToken)
     {
         var baseUri = config.BuildBaseUri();
@@ -95,10 +115,10 @@ internal static class V2RayATouchClient
 
         var sessionState = GetSessionState(config, baseUri);
         using var httpClient = CreateHttpClient(config, sessionState);
-        var runtimeAuthorization = await ResolveAuthorizationAsync(config, baseUri, httpClient, log, cancellationToken, sessionState);
+        var runtimeAuthorization = await ResolveAuthorizationAsync(config, baseUri, httpClient, log, i18n, cancellationToken, sessionState);
         using var request = BuildRequest(config, baseUri, touchUri, runtimeAuthorization);
 
-        log.WriteLine($"[INFO] Querying v2rayA: {touchUri}");
+        log.WriteLine(T(i18n, $"[INFO] Querying v2rayA: {touchUri}", $"[INFO] 正在请求 v2rayA：{touchUri}"));
         using var response = await httpClient.SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
@@ -108,20 +128,23 @@ internal static class V2RayATouchClient
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"v2rayA /api/touch returned {(int)response.StatusCode} {response.ReasonPhrase}: {TrimForLog(responseText)}");
+                T(
+                    i18n,
+                    $"v2rayA /api/touch returned {(int)response.StatusCode} {response.ReasonPhrase}: {TrimForLog(responseText)}",
+                    $"v2rayA /api/touch 返回 {(int)response.StatusCode} {response.ReasonPhrase}：{TrimForLog(responseText)}"));
         }
 
         using var doc = JsonDocument.Parse(responseText);
         if (!doc.RootElement.TryGetProperty("data", out var data) ||
             !data.TryGetProperty("touch", out var touch))
         {
-            throw new InvalidOperationException("v2rayA /api/touch response does not contain data.touch.");
+            throw new InvalidOperationException(T(i18n, "v2rayA /api/touch response does not contain data.touch.", "v2rayA /api/touch 响应不包含 data.touch。"));
         }
 
         var connected = EnumerateConnected(touch).ToArray();
         if (connected.Length == 0)
         {
-            log.WriteLine("[INFO] v2rayA reported no connected server. No dynamic excludeCidrs added.");
+            log.WriteLine(T(i18n, "[INFO] v2rayA reported no connected server. No dynamic excludeCidrs added.", "[INFO] v2rayA 未报告已连接服务器，不会添加动态 excludeCidrs。"));
             return [];
         }
 
@@ -137,7 +160,7 @@ internal static class V2RayATouchClient
 
         if (rawAddresses.Count == 0)
         {
-            log.WriteLine("[WARN] v2rayA connected server found, but address mapping failed. No dynamic excludeCidrs added.");
+            log.WriteLine(T(i18n, "[WARN] v2rayA connected server found, but address mapping failed. No dynamic excludeCidrs added.", "[WARN] v2rayA 找到了已连接服务器，但地址映射失败，不会添加动态 excludeCidrs。"));
             return [];
         }
 
@@ -197,7 +220,7 @@ internal static class V2RayATouchClient
 
         if (cidrs.Count == 0)
         {
-            log.WriteLine("[WARN] v2rayA connected servers resolved to no IP addresses. No dynamic excludeCidrs added.");
+            log.WriteLine(T(i18n, "[WARN] v2rayA connected servers resolved to no IP addresses. No dynamic excludeCidrs added.", "[WARN] v2rayA 已连接服务器未解析出 IP 地址，不会添加动态 excludeCidrs。"));
             return [];
         }
 
@@ -216,11 +239,14 @@ internal static class V2RayATouchClient
         if (omitted > 0)
         {
             log.WriteLine(
-                $"[INFO] v2rayA dynamic excludeCidrs resolved {ordered.Length} entries. Sample: {string.Join(", ", sample)} (+{omitted} more)");
+                T(
+                    i18n,
+                    $"[INFO] v2rayA dynamic excludeCidrs resolved {ordered.Length} entries. Sample: {string.Join(", ", sample)} (+{omitted} more)",
+                    $"[INFO] v2rayA 动态 excludeCidrs 已解析出 {ordered.Length} 条。示例：{string.Join(", ", sample)}（另有 {omitted} 条）"));
         }
         else
         {
-            log.WriteLine($"[INFO] v2rayA dynamic excludeCidrs: {string.Join(", ", sample)}");
+            log.WriteLine(T(i18n, $"[INFO] v2rayA dynamic excludeCidrs: {string.Join(", ", sample)}", $"[INFO] v2rayA 动态 excludeCidrs：{string.Join(", ", sample)}"));
         }
 
         return ordered;
@@ -230,19 +256,20 @@ internal static class V2RayATouchClient
         V2RayAConfig config,
         ProxyConfig fallbackProxy,
         TextWriter log,
+        Localizer i18n,
         CancellationToken cancellationToken)
     {
-        var proxyUri = await ResolveProxyUriAsync(config, fallbackProxy, log, cancellationToken);
+        var proxyUri = await ResolveProxyUriAsync(config, fallbackProxy, log, i18n, cancellationToken);
 
         var baseUri = config.BuildBaseUri();
         var touchUri = new Uri(baseUri, "api/touch");
 
         var sessionState = GetSessionState(config, baseUri);
         using var httpClient = CreateHttpClient(config, sessionState);
-        var runtimeAuthorization = await ResolveAuthorizationAsync(config, baseUri, httpClient, log, cancellationToken, sessionState);
+        var runtimeAuthorization = await ResolveAuthorizationAsync(config, baseUri, httpClient, log, i18n, cancellationToken, sessionState);
         using var request = BuildRequest(config, baseUri, touchUri, runtimeAuthorization);
 
-        log.WriteLine($"[INFO] Querying v2rayA: {touchUri}");
+        log.WriteLine(T(i18n, $"[INFO] Querying v2rayA: {touchUri}", $"[INFO] 正在请求 v2rayA：{touchUri}"));
         using var response = await httpClient.SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
@@ -252,23 +279,26 @@ internal static class V2RayATouchClient
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"v2rayA /api/touch returned {(int)response.StatusCode} {response.ReasonPhrase}: {TrimForLog(responseText)}");
+                T(
+                    i18n,
+                    $"v2rayA /api/touch returned {(int)response.StatusCode} {response.ReasonPhrase}: {TrimForLog(responseText)}",
+                    $"v2rayA /api/touch 返回 {(int)response.StatusCode} {response.ReasonPhrase}：{TrimForLog(responseText)}"));
         }
 
         using var doc = JsonDocument.Parse(responseText);
         if (!doc.RootElement.TryGetProperty("data", out var data) ||
             !data.TryGetProperty("touch", out var touch))
         {
-            throw new InvalidOperationException("v2rayA /api/touch response does not contain data.touch.");
+            throw new InvalidOperationException(T(i18n, "v2rayA /api/touch response does not contain data.touch.", "v2rayA /api/touch 响应不包含 data.touch。"));
         }
 
         var connectedCount = EnumerateConnected(touch).Count();
         if (connectedCount <= 0)
         {
-            throw new InvalidOperationException("v2rayA /api/touch indicates no connected server.");
+            throw new InvalidOperationException(T(i18n, "v2rayA /api/touch indicates no connected server.", "v2rayA /api/touch 表示当前没有已连接服务器。"));
         }
 
-        log.WriteLine($"[INFO] v2rayA runtime check passed with {connectedCount} connected server(s).");
+        log.WriteLine(T(i18n, $"[INFO] v2rayA runtime check passed with {connectedCount} connected server(s).", $"[INFO] v2rayA 运行时检查通过，已连接服务器数量：{connectedCount}。"));
         return (proxyUri, connectedCount);
     }
 
@@ -291,6 +321,7 @@ internal static class V2RayATouchClient
         Uri baseUri,
         HttpClient httpClient,
         TextWriter log,
+        Localizer i18n,
         CancellationToken cancellationToken,
         V2RayASessionState sessionState)
     {
@@ -310,14 +341,14 @@ internal static class V2RayATouchClient
             if (sessionState.CookieSessionReady &&
                 DateTimeOffset.UtcNow - sessionState.LastLoginUtc <= CookieSessionReuseWindow)
             {
-                log.WriteLine("[INFO] v2rayA login skipped (reusing previous cookie session).");
+                log.WriteLine(T(i18n, "[INFO] v2rayA login skipped (reusing previous cookie session).", "[INFO] 已跳过 v2rayA 登录（复用之前的 Cookie 会话）。"));
                 return configuredAuthorization;
             }
         }
 
         var loginUri = new Uri(baseUri, "api/login");
-        using var loginRequest = BuildLoginRequest(config, baseUri, loginUri);
-        log.WriteLine($"[INFO] Logging in to v2rayA: {loginUri}");
+        using var loginRequest = BuildLoginRequest(config, baseUri, loginUri, i18n);
+        log.WriteLine(T(i18n, $"[INFO] Logging in to v2rayA: {loginUri}", $"[INFO] 正在登录 v2rayA：{loginUri}"));
 
         using var loginResponse = await httpClient.SendAsync(
             loginRequest,
@@ -328,10 +359,13 @@ internal static class V2RayATouchClient
         if (!loginResponse.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"v2rayA /api/login returned {(int)loginResponse.StatusCode} {loginResponse.ReasonPhrase}: {TrimForLog(responseText)}");
+                T(
+                    i18n,
+                    $"v2rayA /api/login returned {(int)loginResponse.StatusCode} {loginResponse.ReasonPhrase}: {TrimForLog(responseText)}",
+                    $"v2rayA /api/login 返回 {(int)loginResponse.StatusCode} {loginResponse.ReasonPhrase}：{TrimForLog(responseText)}"));
         }
 
-        ValidateLoginResponse(responseText);
+        ValidateLoginResponse(responseText, i18n);
 
         var loginAuthorization = ExtractAuthorizationFromLoginResponse(loginResponse, responseText);
         if (!string.IsNullOrWhiteSpace(loginAuthorization))
@@ -343,7 +377,7 @@ internal static class V2RayATouchClient
                 sessionState.LastLoginUtc = DateTimeOffset.UtcNow;
             }
 
-            log.WriteLine("[INFO] v2rayA login succeeded (authorization token acquired).");
+            log.WriteLine(T(i18n, "[INFO] v2rayA login succeeded (authorization token acquired).", "[INFO] v2rayA 登录成功（已获取 authorization token）。"));
             return loginAuthorization;
         }
 
@@ -355,19 +389,19 @@ internal static class V2RayATouchClient
 
         if (!string.IsNullOrWhiteSpace(configuredAuthorization))
         {
-            log.WriteLine("[WARN] v2rayA login succeeded but no authorization token found; fallback to configured authorization.");
+            log.WriteLine(T(i18n, "[WARN] v2rayA login succeeded but no authorization token found; fallback to configured authorization.", "[WARN] v2rayA 登录成功，但未找到 authorization token；将回退到配置中的 authorization。"));
             return configuredAuthorization;
         }
 
-        log.WriteLine("[INFO] v2rayA login succeeded (session-cookie mode).");
+        log.WriteLine(T(i18n, "[INFO] v2rayA login succeeded (session-cookie mode).", "[INFO] v2rayA 登录成功（session-cookie 模式）。"));
         return null;
     }
 
-    private static HttpRequestMessage BuildLoginRequest(V2RayAConfig config, Uri baseUri, Uri loginUri)
+    private static HttpRequestMessage BuildLoginRequest(V2RayAConfig config, Uri baseUri, Uri loginUri, Localizer i18n)
     {
         if (string.IsNullOrWhiteSpace(config.Username) || string.IsNullOrWhiteSpace(config.Password))
         {
-            throw new InvalidOperationException("v2rayA.username and v2rayA.password are required for /api/login.");
+            throw new InvalidOperationException(T(i18n, "v2rayA.username and v2rayA.password are required for /api/login.", "调用 /api/login 需要填写 v2rayA.username 和 v2rayA.password。"));
         }
 
         var payloadJson = JsonSerializer.Serialize(
@@ -384,7 +418,7 @@ internal static class V2RayATouchClient
         return request;
     }
 
-    private static void ValidateLoginResponse(string responseText)
+    private static void ValidateLoginResponse(string responseText, Localizer i18n)
     {
         if (string.IsNullOrWhiteSpace(responseText))
         {
@@ -406,10 +440,10 @@ internal static class V2RayATouchClient
 
             if (TryReadStringPropertyIgnoreCase(doc.RootElement, "message", out var message))
             {
-                throw new InvalidOperationException($"v2rayA /api/login failed: {message} (code: {code}).");
+                throw new InvalidOperationException(T(i18n, $"v2rayA /api/login failed: {message} (code: {code}).", $"v2rayA /api/login 失败：{message}（code: {code}）。"));
             }
 
-            throw new InvalidOperationException($"v2rayA /api/login failed with code: {code}.");
+            throw new InvalidOperationException(T(i18n, $"v2rayA /api/login failed with code: {code}.", $"v2rayA /api/login 失败，code: {code}。"));
         }
         catch (JsonException)
         {
@@ -870,6 +904,11 @@ internal static class V2RayATouchClient
         }
 
         return text[..maxLen] + "...";
+    }
+
+    private static string T(Localizer i18n, string english, string chineseSimplified)
+    {
+        return i18n.Text(english, chineseSimplified);
     }
 
     private sealed record V2RayALoginPayload(

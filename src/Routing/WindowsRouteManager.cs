@@ -11,7 +11,7 @@ namespace EpTUN;
 public sealed record DefaultRoute(IPAddress Gateway, IPAddress InterfaceAddress, int Metric);
 public sealed record DefaultRouteV6(IPAddress Gateway, int InterfaceIndex, int Metric);
 
-public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
+internal sealed class WindowsRouteManager(TextWriter log, TextWriter error, Localizer i18n)
 {
     private static readonly Regex RouteLineRegex = new(
         @"^\s*(?<dest>\S+)\s+(?<mask>\S+)\s+(?<gateway>\S+)\s+(?<iface>\S+)\s+(?<metric>\d+)\s*$",
@@ -27,6 +27,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
 
     private readonly TextWriter _log = log;
     private readonly TextWriter _error = error;
+    private readonly Localizer _i18n = i18n;
     private readonly Dictionary<string, int> _ipv4BestInterfaceByGateway = new(StringComparer.Ordinal);
     private readonly object _ipv4InterfaceCacheLock = new();
     private bool _nativeIpv4RouteApiEnabled = OperatingSystem.IsWindows();
@@ -36,7 +37,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         var result = await RunCommandAsync("route", "print -4", cancellationToken);
         if (result.ExitCode != 0)
         {
-            throw new InvalidOperationException($"Failed to read route table: {result.Stderr}".Trim());
+            throw new InvalidOperationException(T($"Failed to read route table: {result.Stderr}".Trim(), $"读取路由表失败：{result.Stderr}".Trim()));
         }
 
         var candidates = new List<DefaultRoute>();
@@ -78,7 +79,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         var best = candidates.OrderBy(static x => x.Metric).FirstOrDefault();
         if (best is null)
         {
-            throw new InvalidOperationException("No IPv4 default route was found.");
+            throw new InvalidOperationException(T("No IPv4 default route was found.", "未找到 IPv4 默认路由。"));
         }
 
         return best;
@@ -89,7 +90,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         var result = await RunCommandAsync("route", "print -6", cancellationToken);
         if (result.ExitCode != 0)
         {
-            throw new InvalidOperationException($"Failed to read IPv6 route table: {result.Stderr}".Trim());
+            throw new InvalidOperationException(T($"Failed to read IPv6 route table: {result.Stderr}".Trim(), $"读取 IPv6 路由表失败：{result.Stderr}".Trim()));
         }
 
         var candidates = new List<DefaultRouteV6>();
@@ -159,7 +160,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
     {
         if (gateway is null || gateway.AddressFamily != AddressFamily.InterNetwork)
         {
-            throw new InvalidOperationException($"IPv4 route {route.Network}/{route.PrefixLength} requires an IPv4 gateway.");
+            throw new InvalidOperationException(T($"IPv4 route {route.Network}/{route.PrefixLength} requires an IPv4 gateway.", $"IPv4 路由 {route.Network}/{route.PrefixLength} 需要 IPv4 网关。"));
         }
 
         if (_nativeIpv4RouteApiEnabled &&
@@ -174,7 +175,9 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
             {
                 _nativeIpv4RouteApiEnabled = false;
                 _error.WriteLine(
-                    $"[WARN] Native IPv4 route API disabled after failure; falling back to route.exe. {ex.Message}");
+                    T(
+                        $"[WARN] Native IPv4 route API disabled after failure; falling back to route.exe. {ex.Message}",
+                        $"[WARN] 原生 IPv4 路由 API 调用失败，已禁用并回退到 route.exe。{ex.Message}"));
             }
         }
 
@@ -210,13 +213,15 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
     {
         if (gateway is not null && gateway.AddressFamily != AddressFamily.InterNetworkV6)
         {
-            throw new InvalidOperationException($"IPv6 route {route.Network}/{route.PrefixLength} requires an IPv6 gateway.");
+            throw new InvalidOperationException(T($"IPv6 route {route.Network}/{route.PrefixLength} requires an IPv6 gateway.", $"IPv6 路由 {route.Network}/{route.PrefixLength} 需要 IPv6 网关。"));
         }
 
         if (gateway is null && !interfaceIndex.HasValue)
         {
             throw new InvalidOperationException(
-                $"IPv6 route {route.Network}/{route.PrefixLength} requires gateway or interface index.");
+                T(
+                    $"IPv6 route {route.Network}/{route.PrefixLength} requires gateway or interface index.",
+                    $"IPv6 路由 {route.Network}/{route.PrefixLength} 需要网关或接口索引。"));
         }
 
         var args = $"interface ipv6 add route prefix={route.Network}/{route.PrefixLength}";
@@ -261,7 +266,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         {
             if (logCommand)
             {
-                _log.WriteLine($"[INFO] {fileName} {arguments}");
+                _log.WriteLine(T($"[INFO] Command executed: {fileName} {arguments}", $"[INFO] 已执行命令：{fileName} {arguments}"));
             }
 
             return;
@@ -269,7 +274,10 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
 
         if (!IsAlreadyExistsError(result))
         {
-            throw new InvalidOperationException($"Command failed: {fileName} {arguments}\n{result.Stderr}".Trim());
+            throw new InvalidOperationException(
+                T(
+                    $"Command failed: {fileName} {arguments}\n{result.Stderr}".Trim(),
+                    $"命令执行失败：{fileName} {arguments}\n{result.Stderr}".Trim()));
         }
 
         await DeleteRouteAsync(route, gateway, cancellationToken, suppressWarning: true, interfaceIndex);
@@ -288,7 +296,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         var result = await RunCommandAsync("netsh", "interface ipv4 show interfaces", cancellationToken);
         if (result.ExitCode != 0)
         {
-            throw new InvalidOperationException($"Failed to list interfaces: {result.Stderr}".Trim());
+            throw new InvalidOperationException(T($"Failed to list interfaces: {result.Stderr}".Trim(), $"列出网络接口失败：{result.Stderr}".Trim()));
         }
 
         using var reader = new StringReader(result.Stdout);
@@ -312,7 +320,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
             }
         }
 
-        throw new InvalidOperationException($"Interface '{interfaceName}' was not found in netsh output.");
+        throw new InvalidOperationException(T($"Interface '{interfaceName}' was not found in netsh output.", $"未在 netsh 输出中找到接口“{interfaceName}”。"));
     }
 
     public async Task DeleteRouteAsync(
@@ -330,7 +338,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
             {
                 if (!suppressWarning)
                 {
-                    _error.WriteLine($"[WARN] Skip deleting IPv4 route {route.Network}/{route.PrefixLength}: missing IPv4 gateway.");
+                    _error.WriteLine(T($"[WARN] Skip deleting IPv4 route {route.Network}/{route.PrefixLength}: missing IPv4 gateway.", $"[WARN] 跳过删除 IPv4 路由 {route.Network}/{route.PrefixLength}：缺少 IPv4 网关。"));
                 }
 
                 return;
@@ -351,7 +359,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
             {
                 if (!suppressWarning)
                 {
-                    _error.WriteLine($"[WARN] Skip deleting IPv6 route {route.Network}/{route.PrefixLength}: invalid IPv6 gateway.");
+                    _error.WriteLine(T($"[WARN] Skip deleting IPv6 route {route.Network}/{route.PrefixLength}: invalid IPv6 gateway.", $"[WARN] 跳过删除 IPv6 路由 {route.Network}/{route.PrefixLength}：IPv6 网关无效。"));
                 }
 
                 return;
@@ -374,7 +382,9 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         if (!suppressWarning && result.ExitCode != 0)
         {
             _error.WriteLine(
-                $"[WARN] Failed to delete route {route.Network}/{route.PrefixLength} via {gateway?.ToString() ?? "on-link"}: {result.Stderr}".Trim());
+                T(
+                    $"[WARN] Failed to delete route {route.Network}/{route.PrefixLength} via {gateway?.ToString() ?? "on-link"}: {result.Stderr}".Trim(),
+                    $"[WARN] 删除路由 {route.Network}/{route.PrefixLength} 经由 {gateway?.ToString() ?? "on-link"} 失败：{result.Stderr}".Trim()));
         }
     }
 
@@ -432,7 +442,9 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
             if (logCommand)
             {
                 _log.WriteLine(
-                    $"[INFO] iphlpapi add ipv4 route {route.Network}/{route.PrefixLength} via {gateway} if={interfaceIndex} metric={metric}");
+                    T(
+                        $"[INFO] iphlpapi add ipv4 route {route.Network}/{route.PrefixLength} via {gateway} if={interfaceIndex} metric={metric}",
+                        $"[INFO] 已通过 iphlpapi 添加 IPv4 路由：{route.Network}/{route.PrefixLength} 经由 {gateway}，接口={interfaceIndex}，metric={metric}"));
             }
 
             return;
@@ -448,7 +460,9 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
                 if (logCommand)
                 {
                     _log.WriteLine(
-                        $"[INFO] iphlpapi replace ipv4 route {route.Network}/{route.PrefixLength} via {gateway} if={interfaceIndex} metric={metric}");
+                        T(
+                            $"[INFO] iphlpapi replace ipv4 route {route.Network}/{route.PrefixLength} via {gateway} if={interfaceIndex} metric={metric}",
+                            $"[INFO] 已通过 iphlpapi 替换 IPv4 路由：{route.Network}/{route.PrefixLength} 经由 {gateway}，接口={interfaceIndex}，metric={metric}"));
                 }
 
                 return;
@@ -456,8 +470,9 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         }
 
         throw new InvalidOperationException(
-            $"Native route add failed ({addCode}): {GetNativeErrorMessage(addCode)}. " +
-            $"Route={route.Network}/{route.PrefixLength}, Gateway={gateway}, IfIndex={interfaceIndex}, Metric={metric}");
+            T(
+                $"Native route add failed ({addCode}): {GetNativeErrorMessage(addCode)}. Route={route.Network}/{route.PrefixLength}, Gateway={gateway}, IfIndex={interfaceIndex}, Metric={metric}",
+                $"原生路由添加失败（{addCode}）：{GetNativeErrorMessage(addCode)}。Route={route.Network}/{route.PrefixLength}, Gateway={gateway}, IfIndex={interfaceIndex}, Metric={metric}"));
     }
 
     private void DeleteIpv4RouteNative(CidrRoute route, IPAddress gateway, int interfaceIndex, bool suppressWarning)
@@ -472,12 +487,13 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         if (!suppressWarning)
         {
             _error.WriteLine(
-                $"[WARN] Native route delete failed ({deleteCode}): {GetNativeErrorMessage(deleteCode)}. " +
-                $"Route={route.Network}/{route.PrefixLength}, Gateway={gateway}, IfIndex={interfaceIndex}");
+                T(
+                    $"[WARN] Native route delete failed ({deleteCode}): {GetNativeErrorMessage(deleteCode)}. Route={route.Network}/{route.PrefixLength}, Gateway={gateway}, IfIndex={interfaceIndex}",
+                    $"[WARN] 原生路由删除失败（{deleteCode}）：{GetNativeErrorMessage(deleteCode)}。Route={route.Network}/{route.PrefixLength}, Gateway={gateway}, IfIndex={interfaceIndex}"));
         }
     }
 
-    private static NativeMethods.MibIpForwardRow CreateIpv4RouteRow(
+    private NativeMethods.MibIpForwardRow CreateIpv4RouteRow(
         CidrRoute route,
         IPAddress gateway,
         int metric,
@@ -485,12 +501,12 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
     {
         if (!IPAddress.TryParse(route.Network, out var destination) || destination.AddressFamily != AddressFamily.InterNetwork)
         {
-            throw new InvalidOperationException($"IPv4 route destination is invalid: {route.Network}/{route.PrefixLength}");
+            throw new InvalidOperationException(T($"IPv4 route destination is invalid: {route.Network}/{route.PrefixLength}", $"IPv4 路由目标地址无效：{route.Network}/{route.PrefixLength}"));
         }
 
         if (!IPAddress.TryParse(route.Mask, out var mask) || mask.AddressFamily != AddressFamily.InterNetwork)
         {
-            throw new InvalidOperationException($"IPv4 route mask is invalid: {route.Network}/{route.PrefixLength} mask {route.Mask}");
+            throw new InvalidOperationException(T($"IPv4 route mask is invalid: {route.Network}/{route.PrefixLength} mask {route.Mask}", $"IPv4 路由掩码无效：{route.Network}/{route.PrefixLength} mask {route.Mask}"));
         }
 
         return new NativeMethods.MibIpForwardRow
@@ -513,12 +529,12 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         };
     }
 
-    private static uint ToIpv4UInt32(IPAddress ipAddress)
+    private uint ToIpv4UInt32(IPAddress ipAddress)
     {
         var bytes = ipAddress.GetAddressBytes();
         if (bytes.Length != 4)
         {
-            throw new InvalidOperationException($"Not an IPv4 address: {ipAddress}");
+            throw new InvalidOperationException(T($"Not an IPv4 address: {ipAddress}", $"不是 IPv4 地址：{ipAddress}"));
         }
 
         // MIB_IPFORWARDROW expects IPv4 values in the same representation returned by inet_addr.
@@ -536,16 +552,19 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
         var result = await RunCommandAsync(fileName, arguments, cancellationToken);
         if (result.ExitCode != 0)
         {
-            throw new InvalidOperationException($"Command failed: {fileName} {arguments}\n{result.Stderr}".Trim());
+            throw new InvalidOperationException(
+                T(
+                    $"Command failed: {fileName} {arguments}\n{result.Stderr}".Trim(),
+                    $"命令执行失败：{fileName} {arguments}\n{result.Stderr}".Trim()));
         }
 
         if (logCommand)
         {
-            _log.WriteLine($"[INFO] {fileName} {arguments}");
+            _log.WriteLine(T($"[INFO] Command executed: {fileName} {arguments}", $"[INFO] 已执行命令：{fileName} {arguments}"));
         }
     }
 
-    private static async Task<ProcessResult> RunCommandAsync(
+    private async Task<ProcessResult> RunCommandAsync(
         string fileName,
         string arguments,
         CancellationToken cancellationToken)
@@ -565,7 +584,7 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
 
         if (!process.Start())
         {
-            throw new InvalidOperationException($"Failed to start process: {fileName}");
+            throw new InvalidOperationException(T($"Failed to start process: {fileName}", $"启动进程失败：{fileName}"));
         }
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
@@ -580,6 +599,11 @@ public sealed class WindowsRouteManager(TextWriter log, TextWriter error)
     }
 
     private sealed record ProcessResult(int ExitCode, string Stdout, string Stderr);
+
+    private string T(string english, string chineseSimplified)
+    {
+        return _i18n.Text(english, chineseSimplified);
+    }
 
     private static class NativeMethods
     {

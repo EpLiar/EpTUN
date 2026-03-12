@@ -16,7 +16,7 @@ internal sealed class FileLogSink : IDisposable
 
     public string FilePath { get; }
 
-    public static FileLogSink Create(string configPath)
+    public static FileLogSink Create(string configPath, Localizer i18n)
     {
         var candidateDirectories = BuildCandidateDirectories(configPath);
         foreach (var directory in candidateDirectories)
@@ -39,7 +39,7 @@ internal sealed class FileLogSink : IDisposable
             }
         }
 
-        throw new InvalidOperationException("Failed to create local log file.");
+        throw new InvalidOperationException(i18n.Text("Failed to create local log file.", "创建本地日志文件失败。"));
     }
 
     public void WriteLine(string line)
