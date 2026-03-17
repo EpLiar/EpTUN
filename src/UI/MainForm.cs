@@ -1,6 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Globalization;
 using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text.Json;
 
@@ -8,6 +9,16 @@ namespace EpTUN;
 
 internal sealed class MainForm : Form
 {
+    private const int WmPowerBroadcast = 0x0218;
+    private const int PbtPowerSettingChange = 0x8013;
+    private const int DeviceNotifyWindowHandle = 0x00000000;
+    private const int ConsoleDisplayStateOff = 0;
+    private const int MaxWindowLogTextLength = 60000;
+    private const int RetainedWindowLogTextLength = 45000;
+
+    private static readonly Guid GuidConsoleDisplayState = new("6FE69556-704A-47A0-8F24-C28D936FDA47");
+    private static readonly Guid GuidSessionDisplayStatus = new("2B84C20E-AD23-4DDF-93DB-05FFBD7EFCA5");
+
     private readonly Localizer _i18n;
     private readonly TextBox _configPathTextBox = new();
     private readonly Button _browseConfigButton = new();
@@ -47,6 +58,18 @@ internal sealed class MainForm : Form
     private int _pendingExternalShowRequest;
     private string _baseStatusText = string.Empty;
     private string _trafficStatusText = string.Empty;
+    private readonly object _pendingWindowLogSync = new();
+    private readonly List<string> _pendingWindowLogLines = new();
+    private readonly int _uiThreadId = Environment.CurrentManagedThreadId;
+    private int _pendingWindowLogFlushQueued;
+    private int _pendingStatusRefreshQueued;
+    private int _statusUpdateVersion;
+    private int _appliedStatusVersion;
+    private bool _isDisplayOn = true;
+    private bool _liveUiSuspendedLogged;
+    private DateTimeOffset? _liveUiSuspendedAtUtc;
+    private IntPtr _consoleDisplayPowerNotification;
+    private IntPtr _sessionDisplayPowerNotification;
 
     public MainForm(string configPath)
     {
@@ -139,6 +162,7 @@ internal sealed class MainForm : Form
         if (disposing)
         {
             StopTrafficMonitor();
+            UnregisterDisplayPowerNotifications();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _appIcon.Dispose();
@@ -150,6 +174,30 @@ internal sealed class MainForm : Form
         }
 
         base.Dispose(disposing);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        RegisterDisplayPowerNotifications();
+        FlushPendingExternalShowRequest();
+        TrySchedulePendingUiRefresh();
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        UnregisterDisplayPowerNotifications();
+        base.OnHandleDestroyed(e);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WmPowerBroadcast && m.WParam == (IntPtr)PbtPowerSettingChange)
+        {
+            HandlePowerSettingChange(m.LParam);
+        }
+
+        base.WndProc(ref m);
     }
 
     private void InitializeLayout(string configPath)
@@ -296,7 +344,8 @@ internal sealed class MainForm : Form
         _trayStopItem.Click += (_, _) => StopVpn();
         _trayExitItem.Click += async (_, _) => await ExitApplicationAsync();
         _notifyIcon.DoubleClick += (_, _) => ShowWindow();
-        HandleCreated += (_, _) => FlushPendingExternalShowRequest();
+        VisibleChanged += (_, _) => TrySchedulePendingUiRefresh();
+        Resize += (_, _) => TrySchedulePendingUiRefresh();
 
         FormClosing += OnFormClosing;
     }
@@ -621,31 +670,53 @@ internal sealed class MainForm : Form
     private void SetStatusText(string text)
     {
         _baseStatusText = text;
-        RefreshStatusLabel();
+        Interlocked.Increment(ref _statusUpdateVersion);
+        TryScheduleStatusRefresh();
     }
 
     private void SetTrafficStatusText(string text)
     {
         _trafficStatusText = text;
-        RefreshStatusLabel();
+        Interlocked.Increment(ref _statusUpdateVersion);
+        TryScheduleStatusRefresh();
     }
 
-    private void RefreshStatusLabel()
+    private void TryScheduleStatusRefresh()
     {
         if (IsDisposed)
         {
             return;
         }
 
-        if (InvokeRequired)
+        if (!IsHandleCreated)
         {
-            BeginInvoke(new Action(RefreshStatusLabel));
+            if (Environment.CurrentManagedThreadId == _uiThreadId)
+            {
+                ApplyStatusLabelText();
+                Volatile.Write(ref _appliedStatusVersion, Volatile.Read(ref _statusUpdateVersion));
+            }
+
             return;
         }
 
-        _statusLabel.Text = string.IsNullOrWhiteSpace(_trafficStatusText)
-            ? _baseStatusText
-            : $"{_baseStatusText} | {_trafficStatusText}";
+        if (!CanRenderLiveUiUpdates())
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _pendingStatusRefreshQueued, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            BeginInvoke(new Action(FlushPendingStatusRefresh));
+        }
+        catch (InvalidOperationException)
+        {
+            Interlocked.Exchange(ref _pendingStatusRefreshQueued, 0);
+        }
     }
 
     private void StartTrafficMonitor(AppConfig config)
@@ -982,6 +1053,7 @@ internal sealed class MainForm : Form
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
+        TrySchedulePendingUiRefresh();
     }
 
     internal void RequestShowWindowFromExternalInstance()
@@ -1024,6 +1096,115 @@ internal sealed class MainForm : Form
         ShowWindow();
     }
 
+    private void RegisterDisplayPowerNotifications()
+    {
+        if (!OperatingSystem.IsWindows() || !IsHandleCreated)
+        {
+            return;
+        }
+
+        if (_consoleDisplayPowerNotification == IntPtr.Zero)
+        {
+            var consoleGuid = GuidConsoleDisplayState;
+            _consoleDisplayPowerNotification = RegisterPowerSettingNotification(Handle, ref consoleGuid, DeviceNotifyWindowHandle);
+        }
+
+        if (_sessionDisplayPowerNotification == IntPtr.Zero)
+        {
+            var sessionGuid = GuidSessionDisplayStatus;
+            _sessionDisplayPowerNotification = RegisterPowerSettingNotification(Handle, ref sessionGuid, DeviceNotifyWindowHandle);
+        }
+
+        if (_consoleDisplayPowerNotification == IntPtr.Zero && _sessionDisplayPowerNotification == IntPtr.Zero)
+        {
+            AppendLog(
+                "WARN",
+                T(
+                    "Display power notification registration failed. UI redraw throttling on monitor-off will be unavailable.",
+                    "显示器电源通知注册失败。显示器关闭时将无法启用 UI 重绘限流。"));
+        }
+    }
+
+    private void UnregisterDisplayPowerNotifications()
+    {
+        if (_consoleDisplayPowerNotification != IntPtr.Zero)
+        {
+            _ = UnregisterPowerSettingNotification(_consoleDisplayPowerNotification);
+            _consoleDisplayPowerNotification = IntPtr.Zero;
+        }
+
+        if (_sessionDisplayPowerNotification != IntPtr.Zero)
+        {
+            _ = UnregisterPowerSettingNotification(_sessionDisplayPowerNotification);
+            _sessionDisplayPowerNotification = IntPtr.Zero;
+        }
+    }
+
+    private void HandlePowerSettingChange(IntPtr lParam)
+    {
+        if (lParam == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var setting = Marshal.PtrToStructure<PowerBroadcastSetting>(lParam);
+        if (setting.DataLength < sizeof(int))
+        {
+            return;
+        }
+
+        if (setting.PowerSetting != GuidConsoleDisplayState && setting.PowerSetting != GuidSessionDisplayStatus)
+        {
+            return;
+        }
+
+        var dataOffset = Marshal.OffsetOf<PowerBroadcastSetting>(nameof(PowerBroadcastSetting.Data)).ToInt32();
+        var displayState = Marshal.ReadInt32(lParam, dataOffset);
+        SetDisplayState(displayState != ConsoleDisplayStateOff);
+    }
+
+    private void SetDisplayState(bool isDisplayOn)
+    {
+        if (_isDisplayOn == isDisplayOn)
+        {
+            return;
+        }
+
+        _isDisplayOn = isDisplayOn;
+
+        if (!isDisplayOn)
+        {
+            _liveUiSuspendedAtUtc = DateTimeOffset.UtcNow;
+            if (!_liveUiSuspendedLogged)
+            {
+                _liveUiSuspendedLogged = true;
+                AppendLog(
+                    "INFO",
+                    T(
+                        "Display turned off. Suspending live window redraws and batching logs to reduce CPU usage.",
+                        "显示器已关闭。暂停实时窗口重绘并批量缓存日志，以降低 CPU 占用。"));
+            }
+
+            return;
+        }
+
+        var bufferedLines = GetPendingWindowLogCount();
+        var suspendedDuration = _liveUiSuspendedAtUtc.HasValue
+            ? DateTimeOffset.UtcNow - _liveUiSuspendedAtUtc.Value
+            : TimeSpan.Zero;
+
+        _liveUiSuspendedAtUtc = null;
+        _liveUiSuspendedLogged = false;
+
+        AppendLog(
+            "INFO",
+            T(
+                $"Display resumed. Restoring live window redraws after {suspendedDuration.TotalSeconds:F1}s with {bufferedLines} buffered log line(s).",
+                $"显示器已恢复。在挂起 {suspendedDuration.TotalSeconds:F1} 秒后恢复实时窗口重绘，期间缓存了 {bufferedLines} 条日志。"));
+
+        TrySchedulePendingUiRefresh();
+    }
+
     private void ApplyLogWrapSetting(bool enabled)
     {
         if (IsDisposed)
@@ -1054,6 +1235,11 @@ internal sealed class MainForm : Form
             return;
         }
 
+        lock (_pendingWindowLogSync)
+        {
+            _pendingWindowLogLines.Clear();
+        }
+
         _logTextBox.Clear();
     }
 
@@ -1067,12 +1253,6 @@ internal sealed class MainForm : Form
         var normalized = message.Replace("\r", string.Empty).TrimEnd('\n');
         if (normalized.Length == 0)
         {
-            return;
-        }
-
-        if (InvokeRequired)
-        {
-            BeginInvoke(new Action(() => AppendLog(level, normalized)));
             return;
         }
 
@@ -1095,22 +1275,147 @@ internal sealed class MainForm : Form
         }
 
         var line = $"[{DateTime.Now:HH:mm:ss}] [{LoggingConfig.ToText(effectiveLevel)}] {content}";
-        if (writeWindow)
-        {
-            _logTextBox.AppendText(line + Environment.NewLine);
-
-            if (_logTextBox.TextLength > 60000)
-            {
-                _logTextBox.Text = _logTextBox.Text[^45000..];
-            }
-
-            _logTextBox.SelectionStart = _logTextBox.TextLength;
-            _logTextBox.ScrollToCaret();
-        }
-
         if (writeFile)
         {
             _fileLogSink!.WriteLine(line);
+        }
+
+        if (writeWindow)
+        {
+            EnqueueWindowLogLine(line);
+        }
+    }
+
+    private void EnqueueWindowLogLine(string line)
+    {
+        lock (_pendingWindowLogSync)
+        {
+            _pendingWindowLogLines.Add(line);
+        }
+
+        TryScheduleWindowLogFlush();
+    }
+
+    private void TryScheduleWindowLogFlush()
+    {
+        if (IsDisposed || !IsHandleCreated || !CanRenderLiveUiUpdates())
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _pendingWindowLogFlushQueued, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            BeginInvoke(new Action(FlushPendingWindowLogs));
+        }
+        catch (InvalidOperationException)
+        {
+            Interlocked.Exchange(ref _pendingWindowLogFlushQueued, 0);
+        }
+    }
+
+    private void FlushPendingWindowLogs()
+    {
+        try
+        {
+            if (IsDisposed || !CanRenderLiveUiUpdates())
+            {
+                return;
+            }
+
+            string[] lines;
+            lock (_pendingWindowLogSync)
+            {
+                if (_pendingWindowLogLines.Count == 0)
+                {
+                    return;
+                }
+
+                lines = _pendingWindowLogLines.ToArray();
+                _pendingWindowLogLines.Clear();
+            }
+
+            AppendWindowLogBatch(lines);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _pendingWindowLogFlushQueued, 0);
+        }
+
+        if (GetPendingWindowLogCount() > 0)
+        {
+            TryScheduleWindowLogFlush();
+        }
+    }
+
+    private void AppendWindowLogBatch(IReadOnlyList<string> lines)
+    {
+        if (lines.Count == 0)
+        {
+            return;
+        }
+
+        _logTextBox.AppendText(string.Join(Environment.NewLine, lines) + Environment.NewLine);
+
+        if (_logTextBox.TextLength > MaxWindowLogTextLength)
+        {
+            _logTextBox.Text = _logTextBox.Text[^RetainedWindowLogTextLength..];
+        }
+
+        _logTextBox.SelectionStart = _logTextBox.TextLength;
+        _logTextBox.ScrollToCaret();
+    }
+
+    private void FlushPendingStatusRefresh()
+    {
+        try
+        {
+            if (IsDisposed || !CanRenderLiveUiUpdates())
+            {
+                return;
+            }
+
+            ApplyStatusLabelText();
+            Volatile.Write(ref _appliedStatusVersion, Volatile.Read(ref _statusUpdateVersion));
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _pendingStatusRefreshQueued, 0);
+        }
+
+        if (Volatile.Read(ref _appliedStatusVersion) != Volatile.Read(ref _statusUpdateVersion))
+        {
+            TryScheduleStatusRefresh();
+        }
+    }
+
+    private void ApplyStatusLabelText()
+    {
+        _statusLabel.Text = string.IsNullOrWhiteSpace(_trafficStatusText)
+            ? _baseStatusText
+            : $"{_baseStatusText} | {_trafficStatusText}";
+    }
+
+    private void TrySchedulePendingUiRefresh()
+    {
+        TryScheduleStatusRefresh();
+        TryScheduleWindowLogFlush();
+    }
+
+    private bool CanRenderLiveUiUpdates()
+    {
+        return _isDisplayOn && Visible && WindowState != FormWindowState.Minimized;
+    }
+
+    private int GetPendingWindowLogCount()
+    {
+        lock (_pendingWindowLogSync)
+        {
+            return _pendingWindowLogLines.Count;
         }
     }
 
@@ -1303,6 +1608,21 @@ internal sealed class MainForm : Form
         }
 
         return null;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr RegisterPowerSettingNotification(IntPtr hRecipient, ref Guid powerSettingGuid, int flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnregisterPowerSettingNotification(IntPtr handle);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PowerBroadcastSetting
+    {
+        public Guid PowerSetting;
+        public uint DataLength;
+        public byte Data;
     }
 }
 
