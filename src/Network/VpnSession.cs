@@ -92,7 +92,7 @@ internal sealed class VpnSession
                 cnExcludeRoutes,
                 cancellationToken);
 
-            _log.WriteLine(T("[INFO] VPN 路由已应用。按 Ctrl+C 可停止。", "[INFO] VPN routes applied. Press Ctrl+C to stop."));
+            _log.WriteLine(T("[INFO] VPN 路由已应用。可在主窗口停止 VPN。", "[INFO] VPN routes applied. Stop the VPN from the main window."));
 
             var exitTask = _tun2SocksProcess.WaitForExitAsync(CancellationToken.None);
             var cancelTask = Task.Delay(Timeout.Infinite, cancellationToken);
