@@ -41,6 +41,7 @@ internal sealed class MainForm : Form
     private readonly ToolStripMenuItem _trayExitItem;
 
     private readonly Icon _appIcon;
+    private readonly string _startupRecoveryConfigPath;
     private LogLevelSetting _windowLogLevel;
     private LogLevelSetting _fileLogLevel;
     private readonly string[] _logLevelLoadWarnings;
@@ -65,6 +66,9 @@ internal sealed class MainForm : Form
     private int _pendingStatusRefreshQueued;
     private int _statusUpdateVersion;
     private int _appliedStatusVersion;
+    private Task<string[]>? _startupRecoveryTask;
+    private int _startupRecoveryStarted;
+    private int _startupRecoveryWaitLogged;
     private bool _isDisplayOn = true;
     private bool _liveUiSuspendedLogged;
     private DateTimeOffset? _liveUiSuspendedAtUtc;
@@ -73,6 +77,7 @@ internal sealed class MainForm : Form
 
     public MainForm(string configPath)
     {
+        _startupRecoveryConfigPath = Path.GetFullPath(configPath);
         _i18n = new Localizer(UiLanguageResolver.ResolveFromConfigPath(configPath));
         _baseStatusText = T("Status: idle", "状态：空闲");
 
@@ -121,9 +126,9 @@ internal sealed class MainForm : Form
             _trayExitItem
         ]);
 
-        InitializeLayout(configPath);
+        InitializeLayout(_startupRecoveryConfigPath);
         HookEvents();
-        TryLoadBypassCnSetting(configPath, logErrors: false);
+        TryLoadBypassCnSetting(_startupRecoveryConfigPath, logErrors: false);
 
         AppendLog("INFO", T("UI ready.", "界面已就绪。"));
         AppendLog("INFO",
@@ -184,6 +189,12 @@ internal sealed class MainForm : Form
         TrySchedulePendingUiRefresh();
     }
 
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        StartStartupRecovery();
+    }
+
     protected override void OnHandleDestroyed(EventArgs e)
     {
         UnregisterDisplayPowerNotifications();
@@ -198,6 +209,17 @@ internal sealed class MainForm : Form
         }
 
         base.WndProc(ref m);
+    }
+
+    public void StartStartupRecovery()
+    {
+        if (Interlocked.Exchange(ref _startupRecoveryStarted, 1) != 0)
+        {
+            return;
+        }
+
+        _startupRecoveryTask = RunStartupRecoverySafeAsync(_startupRecoveryConfigPath);
+        _ = ObserveStartupRecoveryAsync(_startupRecoveryTask);
     }
 
     private void InitializeLayout(string configPath)
@@ -539,6 +561,8 @@ internal sealed class MainForm : Form
             return;
         }
 
+        await EnsureStartupRecoveryCompletedAsync();
+
         var bypassCnEnabled = _bypassCnCheckBox.Checked;
         if (bypassCnEnabled)
         {
@@ -558,6 +582,53 @@ internal sealed class MainForm : Form
         _ = ObserveSessionAsync(_sessionTask);
 
         AppendLog("INFO", T("VPN session started.", "VPN 会话已启动。"));
+    }
+
+    private async Task EnsureStartupRecoveryCompletedAsync()
+    {
+        StartStartupRecovery();
+
+        var recoveryTask = _startupRecoveryTask;
+        if (recoveryTask is null || recoveryTask.IsCompleted)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _startupRecoveryWaitLogged, 1) == 0)
+        {
+            AppendLog("INFO", T("Waiting for startup recovery to finish...", "正在等待启动恢复完成..."));
+        }
+
+        await recoveryTask;
+    }
+
+    private async Task ObserveStartupRecoveryAsync(Task<string[]> recoveryTask)
+    {
+        var messages = await recoveryTask;
+        foreach (var message in messages)
+        {
+            AppendLog("INFO", message);
+        }
+    }
+
+    private async Task<string[]> RunStartupRecoverySafeAsync(string configPath)
+    {
+        try
+        {
+            return await StartupRecovery.RecoverAsync(configPath);
+        }
+        catch (Exception ex)
+        {
+            var crashLogPath = CrashLogWriter.TryWrite(configPath, "StartupRecovery", ex);
+            var warning = string.IsNullOrWhiteSpace(crashLogPath)
+                ? T(
+                    $"[WARN] Startup recovery failed: {ex.Message}",
+                    $"[WARN] 启动恢复失败：{ex.Message}")
+                : T(
+                    $"[WARN] Startup recovery failed: {ex.Message}. Crash log: {crashLogPath}",
+                    $"[WARN] 启动恢复失败：{ex.Message}。崩溃日志：{crashLogPath}");
+            return [warning];
+        }
     }
 
     private void StopVpn()

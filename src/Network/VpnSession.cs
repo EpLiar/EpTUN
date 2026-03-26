@@ -1,11 +1,14 @@
 ﻿using System.Diagnostics;
+using System.ComponentModel;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 
 namespace EpTUN;
 
 internal sealed class VpnSession
 {
+    private static readonly TimeSpan SlowOperationLogThreshold = TimeSpan.FromSeconds(1);
     private readonly AppConfig _config;
     private readonly string _configDirectory;
     private readonly bool? _bypassCnOverride;
@@ -16,6 +19,7 @@ internal sealed class VpnSession
     private readonly List<ManagedRoute> _managedRoutes = new();
 
     private Process? _tun2SocksProcess;
+    private IntPtr _tun2SocksJobHandle;
 
     public VpnSession(
         AppConfig config,
@@ -37,13 +41,37 @@ internal sealed class VpnSession
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        var defaultRoute = await ResolveDefaultRouteAsync(cancellationToken);
-        var defaultRouteV6 = await ResolveDefaultRouteV6Async(cancellationToken);
-        var proxyUri = await ResolveProxyUriAsync(cancellationToken);
-        await EnsureProxyEndpointReachableAsync(proxyUri, cancellationToken);
-        var proxyHosts = await ResolveProxyHostsAsync(proxyUri, cancellationToken);
-        var dynamicExcludeRoutes = await ResolveDynamicExcludeRoutesAsync(cancellationToken);
-        var cnExcludeRoutes = ResolveCnExcludeRoutes();
+        var defaultRoute = await MeasureAsync(
+            () => ResolveDefaultRouteAsync(cancellationToken),
+            "IPv4 默认路由解析",
+            "IPv4 default route resolution");
+        var proxyUri = await MeasureAsync(
+            () => ResolveProxyUriAsync(cancellationToken),
+            "代理端点解析",
+            "Proxy endpoint resolution");
+        await MeasureAsync(
+            () => EnsureProxyEndpointReachableAsync(proxyUri, cancellationToken),
+            "代理端点连通性检查",
+            "Proxy endpoint reachability check");
+        var proxyHosts = await MeasureAsync(
+            () => ResolveProxyHostsAsync(proxyUri, cancellationToken),
+            "代理主机解析",
+            "Proxy host resolution");
+        var dynamicExcludeRoutes = await MeasureAsync(
+            () => ResolveDynamicExcludeRoutesAsync(cancellationToken),
+            "动态排除路由解析",
+            "Dynamic exclude route resolution");
+        var cnExcludeRoutes = Measure(
+            ResolveCnExcludeRoutes,
+            "CN 路由加载",
+            "CN route loading");
+        var shouldResolveDefaultRouteV6 = ShouldResolveDefaultRouteV6(proxyHosts, dynamicExcludeRoutes, cnExcludeRoutes);
+        var defaultRouteV6 = shouldResolveDefaultRouteV6
+            ? await MeasureAsync(
+                () => ResolveDefaultRouteV6Async(cancellationToken),
+                "IPv6 默认路由解析",
+                "IPv6 default route resolution")
+            : null;
 
         _log.WriteLine(T($"[INFO] 代理端点：{proxyUri}", $"[INFO] Proxy endpoint: {proxyUri}"));
         _log.WriteLine(T($"[INFO] VPN 启动前的默认网关：{defaultRoute.Gateway}", $"[INFO] Default gateway before VPN: {defaultRoute.Gateway}"));
@@ -54,7 +82,7 @@ internal sealed class VpnSession
                     $"[INFO] VPN 启动前的 IPv6 默认网关：{defaultRouteV6.Gateway}（接口 {defaultRouteV6.InterfaceIndex}）",
                     $"[INFO] IPv6 default gateway before VPN: {defaultRouteV6.Gateway} (IF {defaultRouteV6.InterfaceIndex})"));
         }
-        else
+        else if (shouldResolveDefaultRouteV6)
         {
             _log.WriteLine(T("[INFO] 未找到 IPv6 默认路由，将跳过 IPv6 绕过路由。", "[INFO] IPv6 default route not found. IPv6 bypass routes will be skipped."));
         }
@@ -115,6 +143,41 @@ internal sealed class VpnSession
             await IgnoreFailuresAsync(stdoutPump);
             await IgnoreFailuresAsync(stderrPump);
         }
+    }
+
+    private bool ShouldResolveDefaultRouteV6(
+        IReadOnlyCollection<IPAddress> proxyHosts,
+        IReadOnlyCollection<CidrRoute> dynamicExcludeRoutes,
+        IReadOnlyCollection<CidrRoute> cnExcludeRoutes)
+    {
+        var includeRoutes = _config.Vpn.IncludeCidrs
+            .Select(CidrRoute.Parse)
+            .Distinct()
+            .ToArray();
+        if (!includeRoutes.Any(static route => route.IsIPv6))
+        {
+            return false;
+        }
+
+        if (_config.Vpn.ExcludeCidrs.Select(CidrRoute.Parse).Any(static route => route.IsIPv6))
+        {
+            return true;
+        }
+
+        if (dynamicExcludeRoutes.Any(static route => route.IsIPv6) ||
+            cnExcludeRoutes.Any(static route => route.IsIPv6))
+        {
+            return true;
+        }
+
+        if (!_config.Vpn.AddBypassRouteForProxyHost)
+        {
+            return false;
+        }
+
+        return proxyHosts.Any(static host =>
+            host.AddressFamily == AddressFamily.InterNetworkV6 &&
+            !IPAddress.IsLoopback(host));
     }
 
     private async Task<DefaultRoute> ResolveDefaultRouteAsync(CancellationToken cancellationToken)
@@ -661,6 +724,7 @@ internal sealed class VpnSession
             throw new InvalidOperationException(T("启动 tun2socks 失败。", "Failed to start tun2socks."));
         }
 
+        TryAttachTun2SocksToJobObject(process);
         return process;
     }
 
@@ -766,14 +830,9 @@ internal sealed class VpnSession
 
     private void StopTun2Socks()
     {
-        if (_tun2SocksProcess is null)
-        {
-            return;
-        }
-
         try
         {
-            if (!_tun2SocksProcess.HasExited)
+            if (_tun2SocksProcess is not null && !_tun2SocksProcess.HasExited)
             {
                 _tun2SocksProcess.Kill(entireProcessTree: true);
                 _tun2SocksProcess.WaitForExit(2000);
@@ -784,8 +843,104 @@ internal sealed class VpnSession
             _error.WriteLine(T($"[WARN] 停止 tun2socks 失败：{ex.Message}", $"[WARN] Failed to stop tun2socks: {ex.Message}"));
         }
 
-        _tun2SocksProcess.Dispose();
+        _tun2SocksProcess?.Dispose();
         _tun2SocksProcess = null;
+        CloseTun2SocksJobHandle();
+    }
+
+    private void TryAttachTun2SocksToJobObject(Process process)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var jobHandle = CreateJobObject(IntPtr.Zero, null);
+        if (jobHandle == IntPtr.Zero)
+        {
+            _error.WriteLine(T("[WARN] 无法创建 tun2socks Job Object；主程序异常退出时可能会遗留子进程。", "[WARN] Failed to create a Job Object for tun2socks; the child process may survive an EpTUN crash."));
+            return;
+        }
+
+        var info = new JobObjectExtendedLimitInformation();
+        info.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+        var infoSize = Marshal.SizeOf<JobObjectExtendedLimitInformation>();
+        var infoPtr = Marshal.AllocHGlobal(infoSize);
+        try
+        {
+            Marshal.StructureToPtr(info, infoPtr, false);
+            if (!SetInformationJobObject(jobHandle, JobObjectExtendedLimitInformationClass, infoPtr, (uint)infoSize))
+            {
+                var message = new Win32Exception(Marshal.GetLastWin32Error()).Message;
+                _error.WriteLine(T($"[WARN] 配置 tun2socks Job Object 失败：{message}", $"[WARN] Failed to configure the tun2socks Job Object: {message}"));
+                _ = CloseHandle(jobHandle);
+                return;
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(infoPtr);
+        }
+
+        if (!AssignProcessToJobObject(jobHandle, process.Handle))
+        {
+            var message = new Win32Exception(Marshal.GetLastWin32Error()).Message;
+            _error.WriteLine(T($"[WARN] 无法将 tun2socks 绑定到 Job Object：{message}", $"[WARN] Failed to assign tun2socks to the Job Object: {message}"));
+            _ = CloseHandle(jobHandle);
+            return;
+        }
+
+        _tun2SocksJobHandle = jobHandle;
+    }
+
+    private void CloseTun2SocksJobHandle()
+    {
+        if (_tun2SocksJobHandle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        _ = CloseHandle(_tun2SocksJobHandle);
+        _tun2SocksJobHandle = IntPtr.Zero;
+    }
+
+    private async Task<T> MeasureAsync<T>(Func<Task<T>> action, string chineseLabel, string englishLabel)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var result = await action();
+        stopwatch.Stop();
+        LogSlowOperation(stopwatch.Elapsed, chineseLabel, englishLabel);
+        return result;
+    }
+
+    private async Task MeasureAsync(Func<Task> action, string chineseLabel, string englishLabel)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        await action();
+        stopwatch.Stop();
+        LogSlowOperation(stopwatch.Elapsed, chineseLabel, englishLabel);
+    }
+
+    private T Measure<T>(Func<T> action, string chineseLabel, string englishLabel)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var result = action();
+        stopwatch.Stop();
+        LogSlowOperation(stopwatch.Elapsed, chineseLabel, englishLabel);
+        return result;
+    }
+
+    private void LogSlowOperation(TimeSpan elapsed, string chineseLabel, string englishLabel)
+    {
+        if (elapsed < SlowOperationLogThreshold)
+        {
+            return;
+        }
+
+        _log.WriteLine(
+            T(
+                $"[INFO] {chineseLabel}耗时 {elapsed.TotalSeconds:F1}s。",
+                $"[INFO] {englishLabel} took {elapsed.TotalSeconds:F1}s."));
     }
 
     private static string QuoteArg(string value)
@@ -857,6 +1012,60 @@ internal sealed class VpnSession
     private string T(string chineseSimplified, string english)
     {
         return _i18n.Text(english, chineseSimplified);
+    }
+
+    private const int JobObjectExtendedLimitInformationClass = 9;
+    private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr securityAttributes, string? name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetInformationJobObject(IntPtr job, int infoType, IntPtr jobObjectInfo, uint jobObjectInfoLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public nuint MinimumWorkingSetSize;
+        public nuint MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public nuint Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectExtendedLimitInformation
+    {
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public nuint ProcessMemoryLimit;
+        public nuint JobMemoryLimit;
+        public nuint PeakProcessMemoryUsed;
+        public nuint PeakJobMemoryUsed;
     }
 }
 

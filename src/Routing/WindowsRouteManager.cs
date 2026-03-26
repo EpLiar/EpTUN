@@ -2,6 +2,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -13,6 +14,7 @@ public sealed record DefaultRouteV6(IPAddress Gateway, int InterfaceIndex, int M
 
 internal sealed class WindowsRouteManager(TextWriter log, TextWriter error, Localizer i18n)
 {
+    private static readonly IPAddress NativeDefaultIpv4ProbeAddress = IPAddress.Parse("8.8.8.8");
     private static readonly Regex RouteLineRegex = new(
         @"^\s*(?<dest>\S+)\s+(?<mask>\S+)\s+(?<gateway>\S+)\s+(?<iface>\S+)\s+(?<metric>\d+)\s*$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -34,6 +36,11 @@ internal sealed class WindowsRouteManager(TextWriter log, TextWriter error, Loca
 
     public async Task<DefaultRoute> GetDefaultRouteAsync(CancellationToken cancellationToken)
     {
+        if (OperatingSystem.IsWindows() && TryGetDefaultRouteNative(out var nativeRoute))
+        {
+            return nativeRoute;
+        }
+
         var result = await RunCommandAsync("route", "print -4", cancellationToken);
         if (result.ExitCode != 0)
         {
@@ -83,6 +90,68 @@ internal sealed class WindowsRouteManager(TextWriter log, TextWriter error, Loca
         }
 
         return best;
+    }
+
+    private bool TryGetDefaultRouteNative(out DefaultRoute route)
+    {
+        route = null!;
+
+        var code = NativeMethods.GetBestRoute(ToIpv4UInt32(NativeDefaultIpv4ProbeAddress), 0, out var row);
+        if (code != NativeMethods.NO_ERROR || row.ForwardIfIndex == 0)
+        {
+            return false;
+        }
+
+        var gateway = FromIpv4UInt32(row.ForwardNextHop);
+        if (gateway.AddressFamily != AddressFamily.InterNetwork || gateway.Equals(IPAddress.Any))
+        {
+            return false;
+        }
+
+        var interfaceAddress = TryGetInterfaceIpv4Address(checked((int)row.ForwardIfIndex)) ?? IPAddress.Any;
+        route = new DefaultRoute(gateway, interfaceAddress, checked((int)row.ForwardMetric1));
+        return true;
+    }
+
+    private static IPAddress? TryGetInterfaceIpv4Address(int interfaceIndex)
+    {
+        foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            IPInterfaceProperties properties;
+            try
+            {
+                properties = networkInterface.GetIPProperties();
+            }
+            catch
+            {
+                continue;
+            }
+
+            IPv4InterfaceProperties? ipv4Properties;
+            try
+            {
+                ipv4Properties = properties.GetIPv4Properties();
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (ipv4Properties is null || ipv4Properties.Index != interfaceIndex)
+            {
+                continue;
+            }
+
+            foreach (var address in properties.UnicastAddresses)
+            {
+                if (address.Address.AddressFamily == AddressFamily.InterNetwork)
+                {
+                    return address.Address;
+                }
+            }
+        }
+
+        return null;
     }
 
     public async Task<DefaultRouteV6?> GetDefaultRouteV6Async(CancellationToken cancellationToken)
@@ -542,6 +611,13 @@ internal sealed class WindowsRouteManager(TextWriter log, TextWriter error, Loca
         return BinaryPrimitives.ReadUInt32LittleEndian(bytes);
     }
 
+    private static IPAddress FromIpv4UInt32(uint value)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        return new IPAddress(bytes);
+    }
+
     private static string GetNativeErrorMessage(uint code)
     {
         return new Win32Exception(unchecked((int)code)).Message;
@@ -615,6 +691,9 @@ internal sealed class WindowsRouteManager(TextWriter log, TextWriter error, Loca
 
         [DllImport("iphlpapi.dll")]
         public static extern uint GetBestInterface(uint destAddr, out uint bestIfIndex);
+
+        [DllImport("iphlpapi.dll")]
+        public static extern uint GetBestRoute(uint destAddr, uint sourceAddr, out MibIpForwardRow bestRoute);
 
         [DllImport("iphlpapi.dll")]
         public static extern uint CreateIpForwardEntry(ref MibIpForwardRow route);

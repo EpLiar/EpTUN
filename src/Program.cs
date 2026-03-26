@@ -12,6 +12,7 @@ internal static class Program
     private const int SwShow = 5;
     private const int SwRestore = 9;
     private const uint AsfwAny = 0xFFFFFFFF;
+    private static int _fatalExceptionHandled;
 
     [STAThread]
     private static void Main(string[] args)
@@ -57,6 +58,8 @@ internal static class Program
         Application.SetHighDpiMode(HighDpiMode.SystemAware);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        RegisterGlobalExceptionHandlers(configPath);
 
         using var activationListenerCts = new CancellationTokenSource();
         var mainForm = new MainForm(configPath);
@@ -68,6 +71,63 @@ internal static class Program
         Application.Run(mainForm);
 
         activationListenerCts.Cancel();
+    }
+
+    private static void RegisterGlobalExceptionHandlers(string configPath)
+    {
+        Application.ThreadException += (_, e) =>
+        {
+            var crashLogPath = CrashLogWriter.TryWrite(configPath, "Application.ThreadException", e.Exception);
+            ShowFatalErrorAndExit(configPath, crashLogPath);
+        };
+
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            var crashLogPath = CrashLogWriter.TryWrite(
+                configPath,
+                "AppDomain.UnhandledException",
+                e.ExceptionObject as Exception,
+                $"IsTerminating: {e.IsTerminating}");
+            ShowFatalErrorAndExit(configPath, crashLogPath);
+        };
+
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            _ = CrashLogWriter.TryWrite(configPath, "TaskScheduler.UnobservedTaskException", e.Exception);
+            e.SetObserved();
+        };
+    }
+
+    private static void ShowFatalErrorAndExit(string configPath, string? crashLogPath)
+    {
+        if (Interlocked.Exchange(ref _fatalExceptionHandled, 1) != 0)
+        {
+            return;
+        }
+
+        var i18n = new Localizer(UiLanguageResolver.ResolveFromConfigPath(configPath));
+        var message = string.IsNullOrWhiteSpace(crashLogPath)
+            ? i18n.Text(
+                "EpTUN encountered a fatal error and must exit.",
+                "EpTUN 遇到致命错误并即将退出。")
+            : i18n.Text(
+                $"EpTUN encountered a fatal error and must exit.\nCrash log: {crashLogPath}",
+                $"EpTUN 遇到致命错误并即将退出。\n崩溃日志：{crashLogPath}");
+
+        try
+        {
+            MessageBox.Show(
+                message,
+                "EpTUN",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+        catch
+        {
+            // Ignore UI failures while shutting down after a fatal exception.
+        }
+
+        Environment.Exit(1);
     }
 
     private static string ResolveConfigPath(IReadOnlyList<string> args)
